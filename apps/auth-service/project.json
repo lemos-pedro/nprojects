@@ -1,0 +1,34 @@
+{
+  "name": "auth-service",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "apps/auth-service/src",
+  "projectType": "application",
+  "tags": ["scope:app"],
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "outputs": ["{workspaceRoot}/dist/apps/auth-service"],
+      "options": {
+        "command": "tsc -p apps/auth-service/tsconfig.app.json"
+      }
+    },
+    "serve": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsx watch apps/auth-service/src/main.ts"
+      }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "eslint apps/auth-service/src --ext .ts"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "jest --config apps/auth-service/jest.config.ts --runInBand"
+      }
+    }
+  }
+}

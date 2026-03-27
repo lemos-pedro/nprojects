@@ -1,0 +1,176 @@
+services:
+  project-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.project-service
+    container_name: ngola-project-service
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: "0.5"
+    env_file:
+      - .env
+    environment:
+      PROJECT_SERVICE_HOST: 0.0.0.0
+      PROJECT_SERVICE_PORT: 3003
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-bootstrap:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    ports:
+      - '3003:3003'
+    networks:
+      - backend
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.auth-service
+    container_name: ngola-auth-service
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: "0.5"
+    env_file:
+      - .env
+    environment:
+      AUTH_SERVICE_HOST: 0.0.0.0
+      AUTH_SERVICE_PORT: 3001
+      AUTH_JWT_ACCESS_SECRET: ${AUTH_JWT_ACCESS_SECRET:-replace-access-secret}
+      AUTH_JWT_REFRESH_SECRET: ${AUTH_JWT_REFRESH_SECRET:-replace-refresh-secret}
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-bootstrap:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    ports:
+      - '3001:3001'
+    networks:
+      - backend
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.api-gateway
+    container_name: ngola-api-gateway
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: "0.5"
+    env_file:
+      - .env
+    environment:
+      API_GATEWAY_HOST: 0.0.0.0
+      API_GATEWAY_PORT: 3000
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL:-http://auth-service:3001}
+      PROJECT_SERVICE_URL: ${PROJECT_SERVICE_URL:-http://project-service:3003}
+    depends_on:
+      auth-service:
+        condition: service_started
+      project-service:
+        condition: service_started
+    ports:
+      - '3000:3000'
+    networks:
+      - backend
+
+  communication-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.communication-service
+    container_name: ngola-communication-service
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: "0.5"
+    env_file:
+      - .env
+    environment:
+      COMM_SERVICE_HOST: 0.0.0.0
+      COMM_SERVICE_PORT: 3004
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-bootstrap:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    ports:
+      - '3004:3004'
+    networks:
+      - backend
+
+  video-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.video-service
+    container_name: ngola-video-service
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: "0.5"
+    env_file:
+      - .env
+    environment:
+      VIDEO_SERVICE_HOST: 0.0.0.0
+      VIDEO_SERVICE_PORT: 3005
+      LIVEKIT_HOST: livekit
+      LIVEKIT_API_URL: http://livekit:7880
+      LIVEKIT_URL: ws://localhost:7880
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-devsecret}
+      PROJECT_SERVICE_URL: http://project-service:3003/api/v1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-bootstrap:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    ports:
+      - '3005:3005'
+    networks:
+      - backend
+
+  livekit:
+    image: livekit/livekit-server
+    container_name: ngola-livekit
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: "0.5"
+    environment:
+      LIVEKIT_CONFIG: |
+        port: 7880
+        keys:
+          ${LIVEKIT_API_KEY:-devkey}: ${LIVEKIT_API_SECRET:-devsecret}
+        redis:
+          address: redis:6379
+        room:
+          auto_create: true
+          departure_timeout: 20
+        rtc:
+          tcp_port: 7881
+          port_range_start: 50000
+          port_range_end: 50100
+        webhook:
+          api_key: ${LIVEKIT_API_KEY:-devkey}
+          urls:
+            - http://video-service:3005/api/v1/webhooks/livekit
+    command: >
+      --dev
+      --bind 0.0.0.0
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - '7880:7880'
+      - '7881:7881'
+      - '50000-50100:50000-50100/udp'
+    networks:
+      - backend

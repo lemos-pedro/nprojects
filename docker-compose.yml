@@ -1,0 +1,69 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ngola-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ngola_projects}
+      POSTGRES_USER: ${POSTGRES_USER:-ngola}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ngola_dev_password}
+    ports:
+      - '${POSTGRES_HOST_PORT:-5433}:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -U $${POSTGRES_USER:-ngola} -d $${POSTGRES_DB:-ngola_projects}',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  db-bootstrap:
+    image: postgres:16-alpine
+    container_name: ngola-db-bootstrap
+    restart: 'no'
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT_INTERNAL: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-ngola_projects}
+      POSTGRES_USER: ${POSTGRES_USER:-ngola}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ngola_dev_password}
+      SQL_FILE: /bootstrap/ngola_schema.sql
+    volumes:
+      - ./docs/ngola_schema.sql:/bootstrap/ngola_schema.sql:ro
+      - ./scripts/db-bootstrap.sh:/bootstrap/db-bootstrap.sh:ro
+    entrypoint: ['/bin/sh', '/bootstrap/db-bootstrap.sh']
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - backend
+
+  redis:
+    image: redis:7-alpine
+    container_name: ngola-redis
+    restart: unless-stopped
+    ports:
+      - '${REDIS_HOST_PORT:-6380}:6379'
+    networks:
+      - backend
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  backend:
+    name: ngola-backend-network
+    driver: bridge
+
+volumes:
+  postgres_data:

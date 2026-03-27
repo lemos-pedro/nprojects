@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "../../dist/apps/video-service",
+    "rootDir": "../../",
+    "types": ["node"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "../../libs/database/src/**/*.ts",
+    "../../libs/shared/src/**/*.ts"
+  ],
+  "exclude": ["src/**/*.spec.ts"]
+}

@@ -1,0 +1,34 @@
+{
+  "name": "communication-service",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "apps/communication-service/src",
+  "projectType": "application",
+  "tags": ["scope:app"],
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "outputs": ["{workspaceRoot}/dist/apps/communication-service"],
+      "options": {
+        "command": "tsc -p apps/communication-service/tsconfig.app.json"
+      }
+    },
+    "serve": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsx watch apps/communication-service/src/main.ts"
+      }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "eslint apps/communication-service/src --ext .ts"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "jest --config apps/communication-service/jest.config.ts --runInBand"
+      }
+    }
+  }
+}

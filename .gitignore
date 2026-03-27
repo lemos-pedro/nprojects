@@ -1,0 +1,25 @@
+# Dependencies and build artifacts
+node_modules/
+dist/
+coverage/
+.nx/
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+
+# Logs and temp files
+*.log
+*.tmp
+*.pid
+tmp/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Docs binaries
+docs/*.docx
+docs/*.xlsx
