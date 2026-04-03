@@ -49,3 +49,15 @@ export type TokenRequestDto = {
   role: ParticipantRole;
   name?: string;
 };
+
+export type AdmitParticipantDto = {
+  hostUserId: string;
+  participantUserId: string;
+};
+
+export type WaitingParticipant = {
+  userId: string;
+  name?: string;
+  joinedAt?: string;
+  isAdmitted: boolean;
+};

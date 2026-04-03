@@ -1,11 +1,25 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import axios from 'axios';
 import { randomUUID } from 'crypto';
-import { AccessToken, RoomServiceClient, WebhookEvent, WebhookReceiver } from 'livekit-server-sdk';
+import {
+  AccessToken,
+  RoomServiceClient,
+  TrackSource,
+  VideoGrant,
+  WebhookEvent,
+  WebhookReceiver,
+} from 'livekit-server-sdk';
 
 import { isPostgresEnabled, query, withTransaction } from '@ngola/database';
 
-import { CreateMeetingDto, Meeting, ParticipantRole, TokenRequestDto } from './meetings.types';
+import {
+  AdmitParticipantDto,
+  CreateMeetingDto,
+  Meeting,
+  ParticipantRole,
+  TokenRequestDto,
+  WaitingParticipant,
+} from './meetings.types';
 
 type MeetingRow = {
   id: string;
@@ -43,11 +57,41 @@ export class MeetingsService {
   private readonly publicWsUrl = process.env.LIVEKIT_URL ?? 'ws://localhost:7880';
   private readonly projectServiceUrl =
     process.env.PROJECT_SERVICE_URL ?? 'http://project-service:3003/api/v1';
+  private readonly internalServiceToken = process.env.INTERNAL_SERVICE_TOKEN?.trim();
   private readonly openaiModel = process.env.OPENAI_SUMMARY_MODEL ?? 'gpt-4.1-mini';
   private readonly strictAiSummary =
     (process.env.OPENAI_SUMMARY_STRICT ?? 'false').toLowerCase() === 'true';
   private readonly roomClient = new RoomServiceClient(this.apiUrl, this.apiKey, this.apiSecret);
   private readonly webhookReceiver = new WebhookReceiver(this.apiKey, this.apiSecret);
+ 
+  // ==================== LISTAR REUNIÕES (NOVO MÉTODO) ====================
+  async list(tenantId?: string): Promise<Meeting[]> {
+    this.logger.log(`Listando reuniões${tenantId ? ` para tenant ${tenantId}` : ''}`);
+
+    if (this.usePostgres) {
+      let sql = `
+        SELECT * FROM meetings
+        WHERE 1=1
+      `;
+      const params: any[] = [];
+      let paramIndex = 1;
+
+      if (tenantId) {
+        sql += ` AND tenant_id = $${paramIndex}`;
+        params.push(tenantId);
+        paramIndex++;
+      }
+
+      sql += ` ORDER BY scheduled_at DESC NULLS LAST, created_at DESC`;
+
+      const result = await query<MeetingRow>(sql, params);
+      return result.rows.map(row => this.mapMeeting(row));
+    }
+
+    // Fallback in-memory
+    const all = Array.from(this.meetings.values());
+    return tenantId ? all.filter(m => m.tenantId === tenantId) : all;
+  }
 
   async create(payload: CreateMeetingDto): Promise<Meeting> {
     if (!payload.tenantId || !payload.createdBy || !payload.title?.trim()) {
@@ -60,7 +104,7 @@ export class MeetingsService {
     await this.roomClient.createRoom({
       name: roomName,
       emptyTimeout: 300,
-      departureTimeout: 20,
+      departureTimeout: 120,
       maxParticipants: payload.maxParticipants ?? 50,
       metadata: JSON.stringify({
         meetingId,
@@ -168,6 +212,10 @@ export class MeetingsService {
 
   async generateToken(meetingId: string, payload: TokenRequestDto): Promise<{ token: string; expiresIn: number }> {
     const meeting = await this.getMeeting(meetingId);
+    if (meeting.status === 'ended' || meeting.status === 'cancelled') {
+      throw new BadRequestException(`meeting is ${meeting.status} and cannot accept new participants`);
+    }
+
     const token = new AccessToken(this.apiKey, this.apiSecret, {
       identity: payload.userId,
       name: payload.name ?? payload.userId,
@@ -195,6 +243,61 @@ export class MeetingsService {
     }
 
     return { token: await token.toJwt(), expiresIn: 3600 };
+  }
+
+  async getWaitingRoom(meetingId: string): Promise<{ meetingId: string; participants: WaitingParticipant[] }> {
+    const meeting = await this.getMeeting(meetingId);
+    const participants = await this.roomClient.listParticipants(meeting.roomName);
+
+    return {
+      meetingId,
+      participants: participants
+        .filter(participant => !this.isHostIdentity(meeting, participant.identity) && !this.isParticipantAdmitted(participant))
+        .map(participant => ({
+          userId: participant.identity,
+          name: participant.name || undefined,
+          joinedAt: participant.joinedAt ? new Date(Number(participant.joinedAt) * 1000).toISOString() : undefined,
+          isAdmitted: false,
+        })),
+    };
+  }
+
+  async admitParticipant(
+    meetingId: string,
+    payload: AdmitParticipantDto,
+  ): Promise<{ meetingId: string; participantUserId: string; admitted: boolean }> {
+    if (!payload.hostUserId || !payload.participantUserId) {
+      throw new BadRequestException('hostUserId and participantUserId are required');
+    }
+
+    const meeting = await this.getMeeting(meetingId);
+    await this.assertHostPermission(meeting, payload.hostUserId);
+
+    try {
+      await this.roomClient.updateParticipant(meeting.roomName, payload.participantUserId, {
+        permission: {
+          canPublish: true,
+          canSubscribe: true,
+          canPublishData: true,
+        },
+        attributes: {
+          waitingRoom: 'false',
+          admittedBy: payload.hostUserId,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message.toLowerCase() : '';
+      if (message.includes('participant does not exist')) {
+        throw new BadRequestException('participant must join room before being admitted');
+      }
+      throw error;
+    }
+
+    return {
+      meetingId,
+      participantUserId: payload.participantUserId,
+      admitted: true,
+    };
   }
 
   async endMeeting(meetingId: string): Promise<Meeting | undefined> {
@@ -315,6 +418,11 @@ export class MeetingsService {
   <div class="card">
     <p>User: <code>${this.escapeHtml(viewer.userId)}</code> | Role: <code>${this.escapeHtml(viewer.role)}</code></p>
     <button id="join" type="button">Join room</button>
+    <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
+      <button id="toggle-mic" type="button" disabled>Mic on</button>
+      <button id="toggle-cam" type="button" disabled>Cam on</button>
+      <button id="share-screen" type="button" disabled>Share screen</button>
+    </div>
     <p id="status" class="muted">Not connected</p>
   </div>
   <div class="grid">
@@ -329,8 +437,14 @@ export class MeetingsService {
     const localEl = document.getElementById('local');
     const remoteEl = document.getElementById('remote');
     const joinButton = document.getElementById('join');
+    const micButton = document.getElementById('toggle-mic');
+    const camButton = document.getElementById('toggle-cam');
+    const screenButton = document.getElementById('share-screen');
     let lk = null;
     let room = null;
+    let micEnabled = false;
+    let camEnabled = false;
+    let screenEnabled = false;
 
     function setStatus(message) {
       statusEl.textContent = message;
@@ -339,6 +453,29 @@ export class MeetingsService {
     function setError(message) {
       setStatus('Error: ' + message);
       joinButton.disabled = false;
+    }
+
+    function setPublishControlsEnabled(enabled) {
+      const readonlyViewer = viewer.role === 'viewer';
+      micButton.disabled = !enabled || readonlyViewer;
+      camButton.disabled = !enabled || readonlyViewer;
+      screenButton.disabled = !enabled || readonlyViewer;
+    }
+
+    function updateControlLabels() {
+      micButton.textContent = micEnabled ? 'Mic off' : 'Mic on';
+      camButton.textContent = camEnabled ? 'Cam off' : 'Cam on';
+      screenButton.textContent = screenEnabled ? 'Stop share' : 'Share screen';
+    }
+
+    function attachLocalTracks() {
+      if (!room) return;
+      localEl.innerHTML = '';
+      room.localParticipant.getTrackPublications().forEach(publication => {
+        const track = publication.track;
+        if (!track) return;
+        localEl.appendChild(track.attach());
+      });
     }
 
     async function loadScript(src) {
@@ -403,8 +540,53 @@ export class MeetingsService {
 
       room.on(lk.RoomEvent.Disconnected, () => {
         setStatus('Disconnected');
+        setPublishControlsEnabled(false);
       });
     }
+
+    micButton.addEventListener('click', async () => {
+      if (!room || viewer.role === 'viewer') return;
+      try {
+        micEnabled = !micEnabled;
+        await room.localParticipant.setMicrophoneEnabled(micEnabled);
+        updateControlLabels();
+      } catch (error) {
+        micEnabled = !micEnabled;
+        setError(error instanceof Error ? error.message : 'failed to toggle microphone');
+      }
+    });
+
+    camButton.addEventListener('click', async () => {
+      if (!room || viewer.role === 'viewer') return;
+      try {
+        camEnabled = !camEnabled;
+        await room.localParticipant.setCameraEnabled(camEnabled);
+        updateControlLabels();
+        attachLocalTracks();
+      } catch (error) {
+        camEnabled = !camEnabled;
+        setError(error instanceof Error ? error.message : 'failed to toggle camera');
+      }
+    });
+
+    screenButton.addEventListener('click', async () => {
+      if (!room || viewer.role === 'viewer') return;
+      try {
+        screenEnabled = !screenEnabled;
+        if (typeof room.localParticipant.setScreenShareEnabled !== 'function') {
+          throw new Error('screen share not supported by this client');
+        }
+        await room.localParticipant.setScreenShareEnabled(screenEnabled);
+        updateControlLabels();
+        attachLocalTracks();
+      } catch (error) {
+        screenEnabled = !screenEnabled;
+        setError(error instanceof Error ? error.message : 'failed to toggle screen share');
+      }
+    });
+
+    updateControlLabels();
+    setPublishControlsEnabled(false);
 
     joinButton.addEventListener('click', async () => {
       joinButton.disabled = true;
@@ -414,10 +596,24 @@ export class MeetingsService {
           setStatus('Loading LiveKit SDK...');
           await ensureLiveKitClient();
         }
-        if (!room) {
-          room = new lk.Room();
-          wireRoomEvents();
+        // Always use a fresh Room instance to avoid reconnect/state mismatch loops
+        // when previous attempts failed and left stale internal reconnect state.
+        if (room) {
+          try {
+            room.disconnect();
+          } catch (disconnectError) {
+            // ignore cleanup errors in demo mode
+          }
         }
+        room = new lk.Room();
+        remoteEl.innerHTML = '';
+        localEl.innerHTML = '';
+        micEnabled = false;
+        camEnabled = false;
+        screenEnabled = false;
+        updateControlLabels();
+        setPublishControlsEnabled(false);
+        wireRoomEvents();
 
         setStatus('Fetching token...');
         const tokenRes = await fetch('/api/v1/meetings/' + meetingId + '/token', {
@@ -437,29 +633,30 @@ export class MeetingsService {
 
         setStatus('Connecting to room...');
         await room.connect(livekitUrl, tokenData.token);
+        setStatus('Connected to ' + room.name);
 
-        if (typeof room.localParticipant.setMicrophoneEnabled === 'function') {
-          await room.localParticipant.setMicrophoneEnabled(true);
-        }
-        if (typeof room.localParticipant.setCameraEnabled === 'function') {
-          await room.localParticipant.setCameraEnabled(true);
-        }
-        if (typeof room.localParticipant.enableCameraAndMicrophone === 'function') {
-          await room.localParticipant.enableCameraAndMicrophone();
-        }
+        setPublishControlsEnabled(true);
 
-        const attachLocalTracks = () => {
-          localEl.innerHTML = '';
-          room.localParticipant.getTrackPublications().forEach(publication => {
-            const track = publication.track;
-            if (!track) return;
-            localEl.appendChild(track.attach());
-          });
-        };
+        // Viewer joins should not fail because of camera/mic publish attempts.
+        if (viewer.role !== 'viewer') {
+          try {
+            micEnabled = true;
+            camEnabled = true;
+            await room.localParticipant.setMicrophoneEnabled(true);
+            await room.localParticipant.setCameraEnabled(true);
+            updateControlLabels();
+          } catch (mediaError) {
+            micEnabled = false;
+            camEnabled = false;
+            updateControlLabels();
+            const message = mediaError instanceof Error ? mediaError.message : 'media publish failed';
+            setStatus('Connected (media warning): ' + message);
+          }
+        }
 
         attachLocalTracks();
-        room.localParticipant.on(lk.ParticipantEvent.TrackSubscribed, attachLocalTracks);
-        setStatus('Connected to ' + room.name);
+        room.on(lk.RoomEvent.LocalTrackPublished, attachLocalTracks);
+        room.on(lk.RoomEvent.LocalTrackUnpublished, attachLocalTracks);
       } catch (error) {
         setError(error instanceof Error ? error.message : 'unknown error');
       } finally {
@@ -471,7 +668,7 @@ export class MeetingsService {
 </html>`;
   }
 
-  private buildVideoGrant(roomName: string, role: ParticipantRole) {
+  private buildVideoGrant(roomName: string, role: ParticipantRole): VideoGrant {
     if (role === ParticipantRole.Host) {
       return {
         roomJoin: true,
@@ -489,6 +686,12 @@ export class MeetingsService {
         roomJoin: true,
         room: roomName,
         canPublish: true,
+        canPublishSources: [
+          TrackSource.CAMERA,
+          TrackSource.MICROPHONE,
+          TrackSource.SCREEN_SHARE,
+          TrackSource.SCREEN_SHARE_AUDIO,
+        ],
         canSubscribe: true,
         canPublishData: true,
       };
@@ -708,7 +911,14 @@ Participants are collaborating on a project review. Produce a concise executive 
               roomName: meeting.roomName,
             },
           },
-          { timeout: 15000 },
+          {
+            timeout: 15000,
+            headers: this.internalServiceToken
+              ? {
+                  'x-internal-service-token': this.internalServiceToken,
+                }
+              : undefined,
+          },
         );
 
         if (response.data?.id) {
@@ -741,6 +951,36 @@ Participants are collaborating on a project review. Produce a concise executive 
       await new Promise(resolve => setTimeout(resolve, delayMs));
     }
     return false;
+  }
+
+  private isParticipantAdmitted(participant: { permission?: { canPublish?: boolean } }): boolean {
+    return Boolean(participant.permission?.canPublish);
+  }
+
+  private isHostIdentity(meeting: Meeting, identity?: string): boolean {
+    if (!identity) return false;
+    return identity === meeting.createdBy;
+  }
+
+  private async assertHostPermission(meeting: Meeting, hostUserId: string): Promise<void> {
+    if (!this.usePostgres) {
+      if (meeting.createdBy !== hostUserId) {
+        throw new BadRequestException('only host can admit participants');
+      }
+      return;
+    }
+
+    const result = await query<{ is_host: boolean }>(
+      `SELECT is_host
+       FROM meeting_participants
+       WHERE meeting_id = $1 AND user_id = $2
+       LIMIT 1`,
+      [meeting.id, hostUserId],
+    );
+
+    if (!result.rows[0]?.is_host) {
+      throw new BadRequestException('only host can admit participants');
+    }
   }
 
   private async findCreatedTaskIds(meeting: Meeting): Promise<string[]> {

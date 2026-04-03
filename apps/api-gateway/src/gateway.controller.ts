@@ -1,4 +1,16 @@
-import { Body, Controller, Delete, Get, Headers, HttpCode, Param, Patch, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Headers,
+  HttpCode,
+  Param,
+  Patch,
+  Post,
+  Query,
+  UnauthorizedException,
+} from '@nestjs/common';
 
 import { GatewayService } from './gateway.service';
 
@@ -250,5 +262,50 @@ export class GatewayController {
       undefined,
       authorization,
     );
+  }
+
+  @Get('billing/plans')
+  getBillingPlans(@Headers('authorization') authorization?: string) {
+    this.assertAuthorizationHeader(authorization);
+    return this.gatewayService.forwardProjectRequest(
+      'get',
+      '/api/v1/billing/plans',
+      undefined,
+      authorization,
+    );
+  }
+
+  @Get('billing/subscription/:tenantId')
+  getBillingSubscription(
+    @Param('tenantId') tenantId: string,
+    @Headers('authorization') authorization?: string,
+  ) {
+    this.assertAuthorizationHeader(authorization);
+    return this.gatewayService.forwardProjectRequest(
+      'get',
+      `/api/v1/billing/subscription/${tenantId}`,
+      undefined,
+      authorization,
+    );
+  }
+
+  @Post('billing/checkout-session')
+  createBillingCheckoutSession(
+    @Body() body: Record<string, unknown>,
+    @Headers('authorization') authorization?: string,
+  ) {
+    this.assertAuthorizationHeader(authorization);
+    return this.gatewayService.forwardProjectRequest(
+      'post',
+      '/api/v1/billing/checkout-session',
+      body,
+      authorization,
+    );
+  }
+
+  private assertAuthorizationHeader(authorization?: string): void {
+    if (!authorization || !authorization.toLowerCase().startsWith('bearer ')) {
+      throw new UnauthorizedException('authorization token is required');
+    }
   }
 }

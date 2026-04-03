@@ -45,12 +45,26 @@ has_plan_type="$(
     -c "SELECT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'plan_type');"
 )"
 
+has_subscription_plans_table="$(
+  psql -tA -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
+    -c "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'subscription_plans');"
+)"
+
+has_subscriptions_table="$(
+  psql -tA -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
+    -c "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'subscriptions');"
+)"
+
 recorded_hash="$(
   psql -tA -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
     -c "SELECT schema_hash FROM public.schema_bootstrap_history ORDER BY applied_at DESC LIMIT 1;"
 )"
 
-if [ "$has_tenants_table" = "t" ] && [ "$has_users_table" = "t" ] && [ "$has_plan_type" = "t" ]; then
+if [ "$has_tenants_table" = "t" ] \
+  && [ "$has_users_table" = "t" ] \
+  && [ "$has_plan_type" = "t" ] \
+  && [ "$has_subscription_plans_table" = "t" ] \
+  && [ "$has_subscriptions_table" = "t" ]; then
   if [ "$recorded_hash" = "$SCHEMA_HASH" ]; then
     echo "Database schema already matches docs/ngola_schema.sql. Skipping bootstrap."
     exit 0

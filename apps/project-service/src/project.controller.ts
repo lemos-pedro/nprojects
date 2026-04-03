@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, HttpCode, Param, Patch, Post, Req, Query } from '@nestjs/common';
 
 import { ProjectService } from './project.service';
 
@@ -130,5 +130,33 @@ export class ProjectController {
   @Delete('tasks/:id')
   deleteTask(@Param('id') id: string) {
     return this.projectService.deleteTask(id);
+  }
+
+  @Get('billing/plans')
+  getBillingPlans() {
+    return this.projectService.getBillingPlans();
+  }
+
+  @Get('billing/subscription/:tenantId')
+  getBillingSubscription(@Param('tenantId') tenantId: string) {
+    return this.projectService.getTenantBillingSubscription(tenantId);
+  }
+
+  @Post('billing/checkout-session')
+  createCheckoutSession(@Body() body: Record<string, unknown>) {
+    return this.projectService.createStripeCheckoutSession(body);
+  }
+
+  @Post('billing/webhooks/stripe')
+  handleStripeWebhook(
+    @Req() request: { rawBody?: Buffer; body?: unknown },
+    @Headers('stripe-signature') signature?: string,
+  ) {
+    const bodyAsBuffer = Buffer.isBuffer(request.body) ? request.body : undefined;
+    const rawBody =
+      request.rawBody?.toString('utf8') ??
+      bodyAsBuffer?.toString('utf8') ??
+      JSON.stringify(request.body ?? {});
+    return this.projectService.handleStripeWebhook(rawBody, signature);
   }
 }

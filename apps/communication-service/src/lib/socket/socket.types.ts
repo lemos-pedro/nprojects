@@ -10,4 +10,9 @@ export enum SocketEvent {
   UserPresence = 'user:presence',
   TaskUpdated = 'task:updated',
   AiAlert = 'ai:alert',
+  MeetingHandRaised = 'participant:hand_raised',
+  MeetingReaction = 'meeting:reaction',
+  MeetingSpotlight = 'meeting:spotlight',
+  MeetingRecordingStatus = 'meeting:recording_status',
+  MeetingMuteAll = 'meeting:mute_all',
 }

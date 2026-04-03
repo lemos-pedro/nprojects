@@ -1,6 +1,7 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { PoolClient } from 'pg';
 import { randomUUID } from 'crypto';
+import Stripe from 'stripe';
 
 import { isPostgresEnabled, query, withTransaction } from '@ngola/database';
 
@@ -105,6 +106,37 @@ interface TaskRow {
   updated_at: string;
 }
 
+interface SubscriptionPlanRow {
+  id: string;
+  name: 'starter' | 'growth' | 'enterprise';
+  display_name: string;
+  description: string | null;
+  price_monthly_usd: number;
+  price_annual_usd: number;
+  max_members: number | null;
+  max_projects: number | null;
+  max_storage_gb: number | null;
+  max_meetings_month: number | null;
+  features: unknown;
+  is_active: boolean;
+}
+
+interface SubscriptionRow {
+  id: string;
+  tenant_id: string;
+  plan_id: string;
+  status: 'active' | 'past_due' | 'cancelled' | 'trialing' | 'paused';
+  billing_interval: 'monthly' | 'annual';
+  current_period_start: string;
+  current_period_end: string;
+  cancelled_at: string | null;
+  cancel_at_period_end: boolean;
+  stripe_customer_id: string | null;
+  stripe_subscription_id: string | null;
+  stripe_price_id: string | null;
+  updated_at: string;
+}
+
 @Injectable()
 export class ProjectService {
   private readonly usePostgres = isPostgresEnabled();
@@ -114,6 +146,14 @@ export class ProjectService {
   private readonly phases = new Map<string, ProjectPhase>();
   private readonly tasks = new Map<string, Task>();
   private readonly labels = new Map<string, Label>();
+  private readonly stripeSecretKey = process.env.STRIPE_SECRET_KEY ?? process.env.Stripe_API_KEY?.trim();
+  private readonly stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET ?? '';
+  private readonly stripe =
+    this.stripeSecretKey && this.stripeSecretKey.length > 0
+      ? new Stripe(this.stripeSecretKey, {
+          apiVersion: '2024-06-20',
+        })
+      : undefined;
 
   async createTenant(payload: Partial<Tenant>): Promise<Tenant> {
     if (!payload.name || !payload.slug) {
@@ -869,6 +909,256 @@ export class ProjectService {
     return { deleted: this.tasks.delete(id) };
   }
 
+  async getBillingPlans(): Promise<Record<string, unknown>[]> {
+    if (!this.usePostgres) {
+      return [];
+    }
+
+    const result = await query<SubscriptionPlanRow>(
+      `SELECT id, name, display_name, description, price_monthly_usd, price_annual_usd,
+              max_members, max_projects, max_storage_gb, max_meetings_month, features, is_active
+       FROM subscription_plans
+       WHERE is_active = TRUE
+       ORDER BY price_monthly_usd ASC`,
+    );
+
+    return result.rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      displayName: row.display_name,
+      description: row.description ?? undefined,
+      prices: {
+        monthlyUsd: Number(row.price_monthly_usd),
+        annualUsd: Number(row.price_annual_usd),
+      },
+      limits: {
+        maxMembers: row.max_members,
+        maxProjects: row.max_projects,
+        maxStorageGb: row.max_storage_gb,
+        maxMeetingsMonth: row.max_meetings_month,
+      },
+      features: Array.isArray(row.features) ? row.features : [],
+    }));
+  }
+
+  async getTenantBillingSubscription(tenantId: string): Promise<Record<string, unknown>> {
+    if (!this.usePostgres) {
+      return { tenantId, subscription: null };
+    }
+
+    const result = await query<SubscriptionRow & SubscriptionPlanRow>(
+      `SELECT s.id, s.tenant_id, s.plan_id, s.status, s.billing_interval, s.current_period_start,
+              s.current_period_end, s.cancelled_at, s.cancel_at_period_end, s.stripe_customer_id,
+              s.stripe_subscription_id, s.stripe_price_id, s.updated_at,
+              p.name, p.display_name, p.description, p.price_monthly_usd, p.price_annual_usd,
+              p.max_members, p.max_projects, p.max_storage_gb, p.max_meetings_month, p.features, p.is_active
+       FROM subscriptions s
+       INNER JOIN subscription_plans p ON p.id = s.plan_id
+       WHERE s.tenant_id = $1
+       ORDER BY s.updated_at DESC
+       LIMIT 1`,
+      [tenantId],
+    );
+
+    const row = result.rows[0];
+    if (!row) return { tenantId, subscription: null };
+
+    return {
+      tenantId,
+      subscription: {
+        id: row.id,
+        status: row.status,
+        billingInterval: row.billing_interval,
+        currentPeriodStart: row.current_period_start,
+        currentPeriodEnd: row.current_period_end,
+        cancelAtPeriodEnd: row.cancel_at_period_end,
+        cancelledAt: row.cancelled_at,
+        stripeCustomerId: row.stripe_customer_id,
+        stripeSubscriptionId: row.stripe_subscription_id,
+        plan: {
+          id: row.plan_id,
+          name: row.name,
+          displayName: row.display_name,
+          description: row.description ?? undefined,
+        },
+      },
+    };
+  }
+
+  async createStripeCheckoutSession(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (!this.stripe) {
+      throw new ServiceUnavailableException('stripe not configured');
+    }
+    if (!this.usePostgres) {
+      throw new ServiceUnavailableException('billing requires postgres');
+    }
+
+    const tenantId = String(payload.tenantId ?? '');
+    const planName = String(payload.planName ?? '');
+    const billingInterval = payload.billingInterval === 'annual' ? 'annual' : 'monthly';
+    const successUrl =
+      typeof payload.successUrl === 'string'
+        ? payload.successUrl
+        : process.env.STRIPE_CHECKOUT_SUCCESS_URL ??
+          'http://localhost:3000/billing/success?session_id={CHECKOUT_SESSION_ID}';
+    const cancelUrl =
+      typeof payload.cancelUrl === 'string'
+        ? payload.cancelUrl
+        : process.env.STRIPE_CHECKOUT_CANCEL_URL ?? 'http://localhost:3000/billing/cancel';
+    const email = typeof payload.email === 'string' ? payload.email : undefined;
+
+    if (!tenantId || !planName) {
+      throw new BadRequestException('tenantId and planName are required');
+    }
+
+    this.assertAllowedCheckoutRedirect(successUrl);
+    this.assertAllowedCheckoutRedirect(cancelUrl);
+
+    const tenantResult = await query<{ id: string; name: string }>(
+      `SELECT id, name FROM tenants WHERE id = $1 LIMIT 1`,
+      [tenantId],
+    );
+    if (!tenantResult.rows[0]) {
+      throw new NotFoundException('tenant not found');
+    }
+
+    const planResult = await query<SubscriptionPlanRow>(
+      `SELECT id, name, display_name, description, price_monthly_usd, price_annual_usd,
+              max_members, max_projects, max_storage_gb, max_meetings_month, features, is_active
+       FROM subscription_plans
+       WHERE name = $1::plan_type AND is_active = TRUE
+       LIMIT 1`,
+      [planName],
+    );
+    const plan = planResult.rows[0];
+    if (!plan) {
+      throw new NotFoundException('plan not found');
+    }
+
+    const subscriptionResult = await query<SubscriptionRow>(
+      `SELECT id, tenant_id, plan_id, status, billing_interval, current_period_start, current_period_end,
+              cancelled_at, cancel_at_period_end, stripe_customer_id, stripe_subscription_id, stripe_price_id, updated_at
+       FROM subscriptions
+       WHERE tenant_id = $1
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      [tenantId],
+    );
+    const existing = subscriptionResult.rows[0];
+
+    let customerId = existing?.stripe_customer_id ?? undefined;
+    if (!customerId) {
+      const customer = await this.stripe.customers.create({
+        email,
+        name: tenantResult.rows[0].name,
+        metadata: {
+          tenantId,
+        },
+      });
+      customerId = customer.id;
+    }
+
+    const amountUsd =
+      billingInterval === 'annual' ? Number(plan.price_annual_usd) : Number(plan.price_monthly_usd);
+    const interval = billingInterval === 'annual' ? 'year' : 'month';
+
+    const session = await this.stripe.checkout.sessions.create({
+      mode: 'subscription',
+      customer: customerId,
+      success_url: successUrl,
+      cancel_url: cancelUrl,
+      line_items: [
+        {
+          quantity: 1,
+          price_data: {
+            currency: 'usd',
+            unit_amount: Math.round(amountUsd * 100),
+            recurring: { interval },
+            product_data: {
+              name: plan.display_name,
+              description: plan.description ?? undefined,
+              metadata: {
+                tenantId,
+                planId: plan.id,
+                planName: plan.name,
+              },
+            },
+          },
+        },
+      ],
+      metadata: {
+        tenantId,
+        planId: plan.id,
+        planName: plan.name,
+        billingInterval,
+      },
+      subscription_data: {
+        metadata: {
+          tenantId,
+          planId: plan.id,
+          planName: plan.name,
+          billingInterval,
+        },
+      },
+    });
+
+    return {
+      id: session.id,
+      url: session.url,
+      tenantId,
+      plan: plan.name,
+      billingInterval,
+    };
+  }
+
+  async handleStripeWebhook(rawBody: string, signature?: string): Promise<Record<string, unknown>> {
+    if (!this.stripe) {
+      throw new ServiceUnavailableException('stripe not configured');
+    }
+    if (!this.stripeWebhookSecret) {
+      throw new ServiceUnavailableException('stripe webhook secret not configured');
+    }
+    if (!signature) {
+      throw new BadRequestException('missing stripe-signature');
+    }
+
+    let event: Stripe.Event;
+    try {
+      event = this.stripe.webhooks.constructEvent(rawBody, signature, this.stripeWebhookSecret);
+    } catch {
+      throw new BadRequestException('invalid stripe webhook signature');
+    }
+
+    switch (event.type) {
+      case 'checkout.session.completed': {
+        const session = event.data.object as Stripe.Checkout.Session;
+        const tenantId = String(session.metadata?.tenantId ?? '');
+        const subscriptionId =
+          typeof session.subscription === 'string' ? session.subscription : session.subscription?.id;
+        if (subscriptionId) {
+          await this.syncStripeSubscriptionById(subscriptionId, tenantId || undefined);
+        }
+        break;
+      }
+      case 'customer.subscription.created':
+      case 'customer.subscription.updated':
+      case 'customer.subscription.deleted': {
+        const subscription = event.data.object as Stripe.Subscription;
+        await this.syncStripeSubscription(subscription);
+        break;
+      }
+      case 'invoice.paid': {
+        const invoice = event.data.object as Stripe.Invoice;
+        await this.syncStripeInvoice(invoice);
+        break;
+      }
+      default:
+        break;
+    }
+
+    return { received: true, eventType: event.type };
+  }
+
   health(): Record<string, number | string> {
     return {
       service: 'project-service',
@@ -881,6 +1171,170 @@ export class ProjectService {
       labels: this.labels.size,
       persistence: this.usePostgres ? 'postgres' : 'memory',
     };
+  }
+
+  private async syncStripeSubscriptionById(subscriptionId: string, tenantHint?: string): Promise<void> {
+    if (!this.stripe) return;
+    const subscription = await this.stripe.subscriptions.retrieve(subscriptionId);
+    await this.syncStripeSubscription(subscription, tenantHint);
+  }
+
+  private async syncStripeSubscription(
+    subscription: Stripe.Subscription,
+    tenantHint?: string,
+  ): Promise<void> {
+    const tenantId = String(subscription.metadata?.tenantId ?? tenantHint ?? '');
+    if (!tenantId) return;
+
+    const metadataPlanId = String(subscription.metadata?.planId ?? '');
+    let planId = metadataPlanId || undefined;
+
+    if (!planId) {
+      const existing = await query<{ plan_id: string }>(
+        `SELECT plan_id
+         FROM subscriptions
+         WHERE stripe_subscription_id = $1
+         LIMIT 1`,
+        [subscription.id],
+      );
+      planId = existing.rows[0]?.plan_id;
+    }
+
+    if (!planId) {
+      const defaultPlan = await query<{ id: string }>(
+        `SELECT id FROM subscription_plans WHERE name = 'starter'::plan_type LIMIT 1`,
+      );
+      planId = defaultPlan.rows[0]?.id;
+    }
+
+    if (!planId) return;
+
+    const status = this.mapStripeStatus(subscription.status);
+    const priceId = subscription.items.data[0]?.price?.id ?? null;
+    const interval =
+      subscription.items.data[0]?.price?.recurring?.interval === 'year' ? 'annual' : 'monthly';
+    const customerId =
+      typeof subscription.customer === 'string' ? subscription.customer : subscription.customer.id;
+
+    await query(
+      `INSERT INTO subscriptions (
+         tenant_id, plan_id, status, billing_interval, current_period_start, current_period_end,
+         stripe_customer_id, stripe_subscription_id, stripe_price_id, cancel_at_period_end, cancelled_at, updated_at
+       )
+       VALUES ($1, $2, $3::billing_status, $4::billing_interval, to_timestamp($5), to_timestamp($6),
+               $7, $8, $9, $10, $11, NOW())
+       ON CONFLICT (stripe_subscription_id)
+       DO UPDATE SET
+         tenant_id = EXCLUDED.tenant_id,
+         plan_id = EXCLUDED.plan_id,
+         status = EXCLUDED.status,
+         billing_interval = EXCLUDED.billing_interval,
+         current_period_start = EXCLUDED.current_period_start,
+         current_period_end = EXCLUDED.current_period_end,
+         stripe_customer_id = EXCLUDED.stripe_customer_id,
+         stripe_price_id = EXCLUDED.stripe_price_id,
+         cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+         cancelled_at = EXCLUDED.cancelled_at,
+         updated_at = NOW()`,
+      [
+        tenantId,
+        planId,
+        status,
+        interval,
+        subscription.current_period_start,
+        subscription.current_period_end,
+        customerId,
+        subscription.id,
+        priceId,
+        Boolean(subscription.cancel_at_period_end),
+        subscription.canceled_at ? new Date(subscription.canceled_at * 1000).toISOString() : null,
+      ],
+    );
+  }
+
+  private async syncStripeInvoice(invoice: Stripe.Invoice): Promise<void> {
+    const subscriptionId =
+      typeof invoice.subscription === 'string' ? invoice.subscription : invoice.subscription?.id;
+    if (!subscriptionId) return;
+
+    const subscription = await query<{ id: string; tenant_id: string }>(
+      `SELECT id, tenant_id
+       FROM subscriptions
+       WHERE stripe_subscription_id = $1
+       LIMIT 1`,
+      [subscriptionId],
+    );
+    const current = subscription.rows[0];
+    if (!current) return;
+
+    await query(
+      `INSERT INTO invoices (
+         tenant_id, subscription_id, stripe_invoice_id, invoice_number, status, amount_due, amount_paid,
+         currency, invoice_pdf_url, period_start, period_end, paid_at, due_date
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, upper($8), $9, to_timestamp($10), to_timestamp($11), $12, $13)
+       ON CONFLICT (stripe_invoice_id)
+       DO UPDATE SET
+         status = EXCLUDED.status,
+         amount_due = EXCLUDED.amount_due,
+         amount_paid = EXCLUDED.amount_paid,
+         invoice_pdf_url = EXCLUDED.invoice_pdf_url,
+         paid_at = EXCLUDED.paid_at,
+         due_date = EXCLUDED.due_date`,
+      [
+        current.tenant_id,
+        current.id,
+        invoice.id,
+        invoice.number ?? null,
+        invoice.status ?? 'open',
+        Number(invoice.amount_due ?? 0) / 100,
+        Number(invoice.amount_paid ?? 0) / 100,
+        invoice.currency ?? 'usd',
+        invoice.hosted_invoice_url ?? null,
+        invoice.period_start,
+        invoice.period_end,
+        invoice.status_transitions?.paid_at
+          ? new Date(invoice.status_transitions.paid_at * 1000).toISOString()
+          : null,
+        invoice.due_date ? new Date(invoice.due_date * 1000).toISOString() : null,
+      ],
+    );
+  }
+
+  private mapStripeStatus(status: Stripe.Subscription.Status): SubscriptionRow['status'] {
+    if (status === 'past_due' || status === 'unpaid') return 'past_due';
+    if (status === 'canceled') return 'cancelled';
+    if (status === 'paused') return 'paused';
+    if (status === 'trialing') return 'trialing';
+    return 'active';
+  }
+
+  private assertAllowedCheckoutRedirect(url: string): void {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new BadRequestException('invalid checkout redirect URL');
+    }
+
+    if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost') {
+      throw new BadRequestException('checkout redirect URL must use https');
+    }
+
+    const allowedOriginsRaw =
+      process.env.STRIPE_ALLOWED_REDIRECT_ORIGINS ?? 'http://localhost:3000,https://localhost:3000';
+    const allowedOrigins = allowedOriginsRaw
+      .split(',')
+      .map(origin => origin.trim())
+      .filter(origin => origin.length > 0);
+
+    if (allowedOrigins.length === 0) {
+      return;
+    }
+
+    if (!allowedOrigins.includes(parsed.origin)) {
+      throw new BadRequestException('checkout redirect origin is not allowed');
+    }
   }
 
   private async replaceProjectMembers(client: PoolClient, projectId: string, members: ProjectMember[]): Promise<void> {

@@ -1,7 +1,7 @@
 FROM node:20-alpine AS builder
 WORKDIR /app
 
-COPY package.json package-lock.json nx.json tsconfig.json jest.preset.js .eslintrc.json ./
+COPY package.json package-lock.json nx.json tsconfig.json tsconfig.libs.json jest.preset.js .eslintrc.json ./
 RUN npm config set fetch-retry-maxtimeout 120000 \
   && npm config set fetch-retries 5 \
   && npm ci --no-audit --no-fund
@@ -9,7 +9,7 @@ RUN npm config set fetch-retry-maxtimeout 120000 \
 COPY libs ./libs
 COPY apps ./apps
 
-RUN npm run build:all
+RUN npm run build:libs && npm run build:all
 
 FROM node:20-alpine AS runtime
 WORKDIR /app
@@ -21,4 +21,4 @@ RUN npm ci --omit=dev --no-audit --no-fund
 COPY --from=builder /app/dist ./dist
 
 EXPOSE 3000
-CMD ["node", "dist/apps/api-gateway/apps/api-gateway/src/main.js"]
+CMD ["node", "-r", "module-alias/register", "dist/apps/api-gateway/apps/api-gateway/src/main.js"]

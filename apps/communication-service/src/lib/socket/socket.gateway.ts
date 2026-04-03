@@ -52,4 +52,54 @@ export class SocketGateway implements OnGatewayConnection, OnGatewayDisconnect, 
     client.leave(payload.channelId);
     return { left: payload.channelId };
   }
+
+  @SubscribeMessage(SocketEvent.MeetingHandRaised)
+  handleMeetingHandRaised(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { meetingId: string; userId: string; raised: boolean; at?: string },
+  ) {
+    const eventPayload = { ...payload, at: payload.at ?? new Date().toISOString() };
+    client.broadcast.emit(SocketEvent.MeetingHandRaised, eventPayload);
+    return { ack: true };
+  }
+
+  @SubscribeMessage(SocketEvent.MeetingReaction)
+  handleMeetingReaction(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { meetingId: string; userId: string; emoji: string; at?: string },
+  ) {
+    const eventPayload = { ...payload, at: payload.at ?? new Date().toISOString() };
+    client.broadcast.emit(SocketEvent.MeetingReaction, eventPayload);
+    return { ack: true };
+  }
+
+  @SubscribeMessage(SocketEvent.MeetingSpotlight)
+  handleMeetingSpotlight(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { meetingId: string; targetUserId: string; requestedBy: string; at?: string },
+  ) {
+    const eventPayload = { ...payload, at: payload.at ?? new Date().toISOString() };
+    client.broadcast.emit(SocketEvent.MeetingSpotlight, eventPayload);
+    return { ack: true };
+  }
+
+  @SubscribeMessage(SocketEvent.MeetingRecordingStatus)
+  handleMeetingRecordingStatus(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { meetingId: string; isRecording: boolean; changedBy: string; at?: string },
+  ) {
+    const eventPayload = { ...payload, at: payload.at ?? new Date().toISOString() };
+    client.broadcast.emit(SocketEvent.MeetingRecordingStatus, eventPayload);
+    return { ack: true };
+  }
+
+  @SubscribeMessage(SocketEvent.MeetingMuteAll)
+  handleMeetingMuteAll(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { meetingId: string; requestedBy: string; exceptUserIds?: string[]; at?: string },
+  ) {
+    const eventPayload = { ...payload, at: payload.at ?? new Date().toISOString() };
+    client.broadcast.emit(SocketEvent.MeetingMuteAll, eventPayload);
+    return { ack: true };
+  }
 }
