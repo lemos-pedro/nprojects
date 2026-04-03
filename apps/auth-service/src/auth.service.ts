@@ -2,11 +2,14 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
+  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { compare, hash } from 'bcryptjs';
 import { PoolClient } from 'pg';
 import { createHmac, randomUUID } from 'crypto';
+import axios from 'axios';
 
 import { query, isPostgresEnabled, withTransaction } from '@ngola/database';
 
@@ -33,8 +36,39 @@ interface DatabaseUserRow {
   created_at: string;
 }
 
+type InviteRole = 'admin' | 'manager' | 'member' | 'viewer' | 'guest';
+
+interface TeamInvitePayload {
+  teamId?: string;
+  teamName?: string;
+  description?: string;
+  email?: string;
+  role?: InviteRole;
+  expiresInDays?: number;
+}
+
+interface JoinTeamByInvitePayload {
+  email?: string;
+  fullName?: string;
+  password?: string;
+}
+
+interface MemoryTeamInvite {
+  token: string;
+  tenantId: string;
+  invitedBy: string;
+  teamId: string;
+  teamName: string;
+  email?: string;
+  role: InviteRole;
+  expiresAt: string;
+  acceptedAt?: string;
+  status: 'pending' | 'accepted' | 'expired' | 'revoked';
+}
+
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
   private readonly usePostgres = isPostgresEnabled();
   private readonly users = new Map<string, AuthUser>();
   private readonly sessions = new Map<string, AuthSession>();
@@ -42,6 +76,11 @@ export class AuthService {
   private readonly refreshSecret = process.env.AUTH_JWT_REFRESH_SECRET ?? 'dev-refresh-secret';
   private readonly accessTtl = Number(process.env.AUTH_ACCESS_TOKEN_TTL ?? 900);
   private readonly refreshTtl = Number(process.env.AUTH_REFRESH_TOKEN_TTL ?? 604800);
+  private readonly teamInvites = new Map<string, MemoryTeamInvite>();
+  private readonly memoryTeams = new Map<
+    string,
+    { id: string; tenantId: string; name: string; description?: string; createdBy: string }
+  >();
 
   async register(payload: RegisterPayload): Promise<SafeAuthUser> {
     if (!payload.email || !payload.password || !payload.fullName) {
@@ -168,6 +207,207 @@ export class AuthService {
     return [...this.users.values()]
       .filter(user => user.tenantId === tenantId)
       .map(user => this.sanitizeUser(user));
+  }
+
+  async createTeamInviteLink(currentUser: SafeAuthUser, payload: TeamInvitePayload) {
+    const role = this.normalizeInviteRole(payload.role);
+    const requestedTeamName = payload.teamName?.trim();
+    const expiresInDays = this.normalizeExpiresInDays(payload.expiresInDays);
+    const expiresAt = new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000);
+    const email = payload.email?.trim().toLowerCase();
+    const token = this.generateInviteToken();
+
+    if (!payload.teamId && !requestedTeamName) {
+      throw new BadRequestException('teamId or teamName is required');
+    }
+
+    const joinBase = (process.env.TEAM_JOIN_BASE_URL ?? 'http://localhost:8080/register').replace(
+      /\/+$/,
+      '',
+    );
+    const inviteUrl = `${joinBase}?inviteToken=${token}`;
+
+    if (this.usePostgres) {
+      const team = await withTransaction(async (client: PoolClient) => {
+        let teamId = payload.teamId;
+        let teamName = requestedTeamName ?? '';
+
+        if (teamId) {
+          const teamResult = await client.query<{ id: string; name: string }>(
+            `SELECT id, name
+             FROM teams
+             WHERE id = $1 AND tenant_id = $2
+             LIMIT 1`,
+            [teamId, currentUser.tenantId],
+          );
+
+          if (!teamResult.rows[0]) {
+            throw new NotFoundException('team not found in this tenant');
+          }
+
+          teamName = teamResult.rows[0].name;
+        } else {
+          const createdTeam = await client.query<{ id: string; name: string }>(
+            `INSERT INTO teams (tenant_id, name, description, created_by)
+             VALUES ($1, $2, $3, $4)
+             RETURNING id, name`,
+            [currentUser.tenantId, requestedTeamName, payload.description ?? null, currentUser.id],
+          );
+          teamId = createdTeam.rows[0].id;
+          teamName = createdTeam.rows[0].name;
+        }
+
+        await client.query(
+          `INSERT INTO invitations (tenant_id, invited_by, email, role, team_id, token, expires_at)
+           VALUES ($1, $2, $3, $4::member_role, $5, $6, $7)`,
+          [currentUser.tenantId, currentUser.id, email ?? `pending+${token.slice(0, 8)}@invite.local`, role, teamId, token, expiresAt.toISOString()],
+        );
+
+        return { id: teamId, name: teamName };
+      });
+
+      const response = {
+        token,
+        inviteUrl,
+        teamId: team.id,
+        teamName: team.name,
+        role,
+        email: email ?? null,
+        expiresAt: expiresAt.toISOString(),
+      };
+
+      await this.sendTeamInviteEmailIfConfigured({
+        email,
+        inviteUrl,
+        teamName: team.name,
+        role,
+        expiresAt: expiresAt.toISOString(),
+      });
+
+      return response;
+    }
+
+    let teamId = payload.teamId;
+    let teamName = requestedTeamName ?? '';
+
+    if (teamId) {
+      const existingTeam = this.memoryTeams.get(teamId);
+      if (!existingTeam || existingTeam.tenantId !== currentUser.tenantId) {
+        throw new NotFoundException('team not found in this tenant');
+      }
+      teamName = existingTeam.name;
+    } else {
+      teamId = randomUUID();
+      this.memoryTeams.set(teamId, {
+        id: teamId,
+        tenantId: currentUser.tenantId,
+        name: requestedTeamName!,
+        description: payload.description,
+        createdBy: currentUser.id,
+      });
+      teamName = requestedTeamName!;
+    }
+
+    this.teamInvites.set(token, {
+      token,
+      tenantId: currentUser.tenantId,
+      invitedBy: currentUser.id,
+      teamId,
+      teamName,
+      email,
+      role,
+      expiresAt: expiresAt.toISOString(),
+      status: 'pending',
+    });
+
+    const response = {
+      token,
+      inviteUrl,
+      teamId,
+      teamName,
+      role,
+      email: email ?? null,
+      expiresAt: expiresAt.toISOString(),
+    };
+
+    await this.sendTeamInviteEmailIfConfigured({
+      email,
+      inviteUrl,
+      teamName,
+      role,
+      expiresAt: expiresAt.toISOString(),
+    });
+
+    return response;
+  }
+
+  async joinTeamByInviteToken(token: string, payload: JoinTeamByInvitePayload) {
+    if (!token?.trim()) {
+      throw new BadRequestException('invite token is required');
+    }
+
+    if (this.usePostgres) {
+      return this.joinTeamByInviteTokenPostgres(token.trim(), payload);
+    }
+
+    const invite = this.teamInvites.get(token.trim());
+    if (!invite || invite.status !== 'pending') {
+      throw new NotFoundException('invite not found or already used');
+    }
+
+    if (new Date(invite.expiresAt).getTime() < Date.now()) {
+      invite.status = 'expired';
+      throw new BadRequestException('invite expired');
+    }
+
+    const payloadEmail = payload.email?.trim().toLowerCase();
+    const inviteEmail = invite.email?.trim().toLowerCase();
+
+    if (inviteEmail && payloadEmail && inviteEmail !== payloadEmail) {
+      throw new BadRequestException('email does not match invite');
+    }
+
+    const email = payloadEmail ?? inviteEmail;
+    if (!email) {
+      throw new BadRequestException('email is required');
+    }
+
+    let user = [...this.users.values()].find(existing => existing.email === email);
+
+    if (!user) {
+      if (!payload.fullName?.trim()) {
+        throw new BadRequestException('fullName is required for new user');
+      }
+      if (!payload.password) {
+        throw new BadRequestException('password is required for new user');
+      }
+
+      user = {
+        id: randomUUID(),
+        tenantId: invite.tenantId,
+        email,
+        fullName: payload.fullName.trim(),
+        passwordHash: await hash(payload.password, 12),
+        twoFactorEnabled: false,
+        createdAt: new Date().toISOString(),
+      };
+      this.users.set(user.id, user);
+    } else if (user.tenantId !== invite.tenantId) {
+      throw new BadRequestException('user belongs to another tenant');
+    }
+
+    invite.status = 'accepted';
+    invite.acceptedAt = new Date().toISOString();
+
+    return {
+      joined: true,
+      teamId: invite.teamId,
+      teamName: invite.teamName,
+      userId: user.id,
+      email: user.email,
+      tenantId: user.tenantId,
+      role: invite.role,
+    };
   }
 
   async getUserFromAccessToken(accessToken: string): Promise<SafeAuthUser> {
@@ -433,5 +673,226 @@ export class AuthService {
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '');
+  }
+
+  private normalizeInviteRole(role?: string): InviteRole {
+    const normalized = role?.trim().toLowerCase();
+    const allowed: InviteRole[] = ['admin', 'manager', 'member', 'viewer', 'guest'];
+    if (!normalized) return 'member';
+    if (allowed.includes(normalized as InviteRole)) {
+      return normalized as InviteRole;
+    }
+    throw new BadRequestException('invalid invite role');
+  }
+
+  private normalizeExpiresInDays(input?: number): number {
+    if (!input) return 7;
+    if (!Number.isFinite(input)) {
+      throw new BadRequestException('expiresInDays must be a finite number');
+    }
+    const value = Math.floor(input);
+    if (value < 1 || value > 30) {
+      throw new BadRequestException('expiresInDays must be between 1 and 30');
+    }
+    return value;
+  }
+
+  private generateInviteToken(): string {
+    return `${randomUUID().replace(/-/g, '')}${randomUUID().replace(/-/g, '')}`;
+  }
+
+  private async sendTeamInviteEmailIfConfigured(input: {
+    email?: string;
+    inviteUrl: string;
+    teamName: string;
+    role: InviteRole;
+    expiresAt: string;
+  }): Promise<void> {
+    if (!input.email) return;
+
+    const resendApiKey = process.env.RESEND_API_KEY;
+    const fromEmail = process.env.RESEND_FROM_EMAIL;
+    if (!resendApiKey || !fromEmail) {
+      this.logger.warn('Skipping invite email: RESEND_API_KEY or RESEND_FROM_EMAIL is not configured');
+      return;
+    }
+
+    const subject = `Convite para entrar na equipa ${input.teamName}`;
+    const text = [
+      `Olá,`,
+      ``,
+      `Você foi convidado para a equipa "${input.teamName}" com o papel "${input.role}".`,
+      `Use este link para entrar: ${input.inviteUrl}`,
+      `Expira em: ${new Date(input.expiresAt).toLocaleString('pt-PT')}`,
+      ``,
+      `Ngola Projects`,
+    ].join('\n');
+
+    const html = `
+      <div style="font-family:Arial,sans-serif;line-height:1.5;color:#0f172a">
+        <h2 style="margin:0 0 12px">Convite de equipa</h2>
+        <p>Você foi convidado para a equipa <strong>${this.escapeHtml(input.teamName)}</strong> com o papel <strong>${this.escapeHtml(input.role)}</strong>.</p>
+        <p><a href="${input.inviteUrl}" style="display:inline-block;padding:10px 14px;background:#185FA5;color:#fff;text-decoration:none;border-radius:8px">Entrar na equipa</a></p>
+        <p>Ou copie e cole este link no browser:</p>
+        <p><code>${this.escapeHtml(input.inviteUrl)}</code></p>
+        <p style="color:#475569;font-size:12px">Expira em: ${this.escapeHtml(
+          new Date(input.expiresAt).toLocaleString('pt-PT'),
+        )}</p>
+      </div>
+    `;
+
+    try {
+      await axios.post(
+        'https://api.resend.com/emails',
+        {
+          from: fromEmail,
+          to: [input.email],
+          subject,
+          html,
+          text,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${resendApiKey}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 10_000,
+        },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+      this.logger.warn(`Failed to send team invite email via Resend: ${message}`);
+    }
+  }
+
+  private escapeHtml(value: string): string {
+    return value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  private async joinTeamByInviteTokenPostgres(token: string, payload: JoinTeamByInvitePayload) {
+    return withTransaction(async (client: PoolClient) => {
+      const inviteResult = await client.query<{
+        id: string;
+        tenant_id: string;
+        team_id: string | null;
+        email: string;
+        role: InviteRole;
+        status: 'pending' | 'accepted' | 'expired' | 'revoked';
+        expires_at: string;
+      }>(
+        `SELECT id, tenant_id, team_id, email, role, status, expires_at
+         FROM invitations
+         WHERE token = $1
+         LIMIT 1`,
+        [token],
+      );
+
+      const invite = inviteResult.rows[0];
+      if (!invite) {
+        throw new NotFoundException('invite not found');
+      }
+
+      if (invite.status !== 'pending') {
+        throw new BadRequestException('invite already used or invalid');
+      }
+
+      if (!invite.team_id) {
+        throw new BadRequestException('invite has no linked team');
+      }
+
+      if (new Date(invite.expires_at).getTime() < Date.now()) {
+        await client.query(`UPDATE invitations SET status = 'expired' WHERE id = $1`, [invite.id]);
+        throw new BadRequestException('invite expired');
+      }
+
+      const teamResult = await client.query<{ id: string; name: string }>(
+        `SELECT id, name
+         FROM teams
+         WHERE id = $1
+         LIMIT 1`,
+        [invite.team_id],
+      );
+
+      if (!teamResult.rows[0]) {
+        throw new NotFoundException('team linked to invite was not found');
+      }
+
+      const payloadEmail = payload.email?.trim().toLowerCase();
+      const inviteEmail = invite.email?.trim().toLowerCase();
+      const inviteIsOpen = inviteEmail.endsWith('@invite.local');
+
+      if (!inviteIsOpen && payloadEmail && inviteEmail !== payloadEmail) {
+        throw new BadRequestException('email does not match invite');
+      }
+
+      const targetEmail = inviteIsOpen ? payloadEmail : payloadEmail ?? inviteEmail;
+      if (!targetEmail) {
+        throw new BadRequestException('email is required');
+      }
+
+      let userId: string;
+
+      const existingUser = await client.query<{ id: string; tenant_id: string }>(
+        `SELECT id, tenant_id
+         FROM users
+         WHERE email = $1
+         ORDER BY created_at ASC
+         LIMIT 1`,
+        [targetEmail],
+      );
+
+      if (existingUser.rows[0]) {
+        if (existingUser.rows[0].tenant_id !== invite.tenant_id) {
+          throw new BadRequestException('user belongs to another tenant');
+        }
+        userId = existingUser.rows[0].id;
+      } else {
+        if (!payload.fullName?.trim()) {
+          throw new BadRequestException('fullName is required for new user');
+        }
+        if (!payload.password) {
+          throw new BadRequestException('password is required for new user');
+        }
+        const passwordHash = await hash(payload.password, 12);
+        const insertedUser = await client.query<{ id: string }>(
+          `INSERT INTO users (tenant_id, email, password_hash, full_name, two_factor_enabled, metadata)
+           VALUES ($1, $2, $3, $4, FALSE, '{}'::jsonb)
+           RETURNING id`,
+          [invite.tenant_id, targetEmail, passwordHash, payload.fullName.trim()],
+        );
+        userId = insertedUser.rows[0].id;
+      }
+
+      await client.query(
+        `INSERT INTO team_members (team_id, user_id, role)
+         VALUES ($1, $2, $3::member_role)
+         ON CONFLICT (team_id, user_id) DO UPDATE
+         SET role = EXCLUDED.role`,
+        [invite.team_id, userId, invite.role],
+      );
+
+      await client.query(
+        `UPDATE invitations
+         SET status = 'accepted',
+             accepted_at = NOW()
+         WHERE id = $1`,
+        [invite.id],
+      );
+
+      return {
+        joined: true,
+        teamId: invite.team_id,
+        teamName: teamResult.rows[0].name,
+        userId,
+        email: targetEmail,
+        tenantId: invite.tenant_id,
+        role: invite.role,
+      };
+    });
   }
 }

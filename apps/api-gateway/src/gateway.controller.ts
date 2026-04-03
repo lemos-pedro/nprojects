@@ -61,6 +61,36 @@ export class GatewayController {
     return this.gatewayService.forwardAuthRequest('get', '/api/v1/users', undefined, authorization);
   }
 
+  @Post('team/invite-link')
+  createTeamInviteLink(
+    @Body()
+    body: {
+      teamId?: string;
+      teamName?: string;
+      description?: string;
+      email?: string;
+      role?: 'admin' | 'manager' | 'member' | 'viewer' | 'guest';
+      expiresInDays?: number;
+    },
+    @Headers('authorization') authorization?: string,
+  ) {
+    this.assertAuthorizationHeader(authorization);
+    return this.gatewayService.forwardAuthRequest(
+      'post',
+      '/api/v1/team/invite-link',
+      body,
+      authorization,
+    );
+  }
+
+  @Post('team/join/:token')
+  joinTeamByInviteToken(
+    @Param('token') token: string,
+    @Body() body: { email?: string; fullName?: string; password?: string },
+  ) {
+    return this.gatewayService.forwardAuthRequest('post', `/api/v1/team/join/${token}`, body);
+  }
+
   @Post('auth/2fa/enable')
   enableTwoFactor(@Headers('authorization') authorization?: string) {
     return this.gatewayService.forwardAuthRequest(
