@@ -662,15 +662,28 @@ CREATE TABLE subscription_plans (
 );
 
 -- Dados seed dos planos
-INSERT INTO subscription_plans (name, display_name, description, price_monthly_usd, price_annual_usd, max_members, max_projects, max_storage_gb, max_meetings_month, has_ai_predictive, has_power_bi, has_api_access, has_sso, has_audit_logs, has_custom_domain, features) VALUES
-('starter',    'Starter',    'Para pequenas empresas e startups',           49,  470,  10,   5,   5,   20,  FALSE, FALSE, FALSE, FALSE, FALSE, FALSE,
- '["Chat por projecto", "Videochamadas (até 10 participantes)", "Resumo IA básico", "Microsoft 365 integrado", "Dashboard básico"]'),
-('growth',     'Growth',     'Para equipas médias em crescimento',         149, 1430,  50,  25,  50,   NULL, TRUE,  FALSE, TRUE,  FALSE, TRUE,  FALSE,
- '["Tudo do Starter", "IA preditiva (atrasos e riscos)", "Canais ilimitados", "API pública", "Audit logs 90 dias", "Videochamadas ilimitadas", "Gravação de reuniões 10GB"]'),
-('enterprise', 'Enterprise', 'Para grandes empresas e indústrias críticas', 399, 3830, NULL, NULL, NULL,  NULL, TRUE,  TRUE,  TRUE,  TRUE,  TRUE,  TRUE,
- '["Tudo do Growth", "Power BI integrado", "SSO/SAML enterprise", "IA preditiva avançada por vertical", "Domínio custom", "SLA 99.9%", "Suporte dedicado", "Audit logs ilimitados", "Backup dedicado"]');
+INSERT INTO subscription_plans 
+    (name, display_name, description, price_monthly_usd, price_annual_usd, 
+     max_members, max_projects, max_storage_gb, max_meetings_month, 
+     has_ai_predictive, has_power_bi, has_api_access, has_sso, 
+     has_audit_logs, has_custom_domain, features) 
+VALUES
+('starter',    'Starter',    'Para pequenas empresas e startups',           
+    49,  470,   10,    5,    5,    20,  
+    FALSE, FALSE, FALSE, FALSE, FALSE, FALSE,
+    '["Chat por projecto", "Videochamadas (até 10 participantes)", "Resumo IA básico", "Microsoft 365 integrado", "Dashboard básico"]'),
 
--- Subscriptions activas por tenant
+('growth',     'Growth',     'Para equipas médias em crescimento',         
+    149, 1430,  50,   25,   50,   NULL,  
+    TRUE,  FALSE, TRUE,  FALSE, TRUE,  FALSE,
+    '["Tudo do Starter", "IA preditiva (atrasos e riscos)", "Canais ilimitados", "API pública", "Audit logs 90 dias", "Videochamadas ilimitadas", "Gravação de reuniões 10GB"]'),
+
+('enterprise', 'Enterprise', 'Para grandes empresas e indústrias críticas', 
+    399, 3830, 999, 999, 999,   NULL,  
+    TRUE,  TRUE,  TRUE,  TRUE,  TRUE,  TRUE,
+    '["Tudo do Growth", "Power BI integrado", "SSO/SAML enterprise", "IA preditiva avançada por vertical", "Domínio custom", "SLA 99.9%", "Suporte dedicado", "Audit logs ilimitados", "Backup dedicado"]');
+
+    -- Subscriptions activas por tenant
 CREATE TABLE subscriptions (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id           UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
