@@ -661,8 +661,8 @@ CREATE TABLE subscription_plans (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Dados seed dos planos
 
+-- Dados seed dos planos (CORRIGIDO)
 INSERT INTO subscription_plans 
     (name, display_name, description, price_monthly_usd, price_annual_usd, 
      max_members, max_projects, max_storage_gb, max_meetings_month, 
@@ -685,7 +685,7 @@ VALUES
     '["Tudo do Growth", "Power BI integrado", "SSO/SAML enterprise", "IA preditiva avançada por vertical", "Domínio custom", "SLA 99.9%", "Suporte dedicado", "Audit logs ilimitados", "Backup dedicado"]');
 
     -- Subscriptions activas por tenant
-    
+
 CREATE TABLE subscriptions (
     id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     tenant_id           UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
