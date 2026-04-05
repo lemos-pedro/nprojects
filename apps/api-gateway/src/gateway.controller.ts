@@ -30,35 +30,35 @@ export class GatewayController {
 
   @Post('auth/register')
   register(@Body() body: Record<string, unknown>) {
-    return this.gatewayService.forwardAuthRequest('post', '/api/v1/auth/register', body);
+    return this.gatewayService.forwardAuthRequest('post', '/auth/register', body);
   }
 
   @HttpCode(200)
   @Post('auth/login')
   login(@Body() body: Record<string, unknown>) {
-    return this.gatewayService.forwardAuthRequest('post', '/api/v1/auth/login', body);
+    return this.gatewayService.forwardAuthRequest('post', '/auth/login', body);
   }
 
   @HttpCode(200)
   @Post('auth/refresh')
   refresh(@Body() body: Record<string, unknown>) {
-    return this.gatewayService.forwardAuthRequest('post', '/api/v1/auth/refresh', body);
+    return this.gatewayService.forwardAuthRequest('post', '/auth/refresh', body);
   }
 
   @HttpCode(200)
   @Post('auth/logout')
   logout(@Body() body: Record<string, unknown>) {
-    return this.gatewayService.forwardAuthRequest('post', '/api/v1/auth/logout', body);
+    return this.gatewayService.forwardAuthRequest('post', '/auth/logout', body);
   }
 
   @Get('me')
   getMe(@Headers('authorization') authorization?: string) {
-    return this.gatewayService.forwardAuthRequest('get', '/api/v1/me', undefined, authorization);
+    return this.gatewayService.forwardAuthRequest('get', '/me', undefined, authorization);
   }
 
   @Get('users')
   getUsers(@Headers('authorization') authorization?: string) {
-    return this.gatewayService.forwardAuthRequest('get', '/api/v1/users', undefined, authorization);
+    return this.gatewayService.forwardAuthRequest('get', '/users', undefined, authorization);
   }
 
   @Post('team/invite-link')
@@ -77,7 +77,7 @@ export class GatewayController {
     this.assertAuthorizationHeader(authorization);
     return this.gatewayService.forwardAuthRequest(
       'post',
-      '/api/v1/team/invite-link',
+      '/team/invite-link',
       body,
       authorization,
     );
@@ -375,45 +375,45 @@ export class GatewayController {
 
   @Get('notifications')
   getNotifications(@Query('userId') userId: string | undefined, @Headers('authorization') authorization?: string) {
-    return this.gatewayService.forwardCommRequest('get', '/api/v1/notifications', undefined, authorization, { userId });
+    return this.gatewayService.forwardCommRequest('get', '/notifications', undefined, authorization, { userId });
   }
 
   @Post('notifications/:id/read')
   markNotificationRead(@Param('id') id: string, @Headers('authorization') authorization?: string) {
-    return this.gatewayService.forwardCommRequest('post', `/api/v1/notifications/${id}/read`, undefined, authorization);
+    return this.gatewayService.forwardCommRequest('post', `/notifications/${id}/read`, undefined, authorization);
   }
 
   @Post('notifications/read-all')
   markAllNotificationsRead(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string) {
-    return this.gatewayService.forwardCommRequest('post', '/api/v1/notifications/read-all', body, authorization);
+    return this.gatewayService.forwardCommRequest('post', '/notifications/read-all', body, authorization);
   }
 
   // ==================== CHANNELS ====================
 
   @Post('channels')
   createChannel(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string) {
-    return this.gatewayService.forwardCommRequest('post', '/api/v1/channels', body, authorization);
+    return this.gatewayService.forwardCommRequest('post', '/channels', body, authorization);
   }
 
   @Get('channels')
   getChannels(@Query('userId') userId: string | undefined, @Headers('authorization') authorization?: string) {
-    return this.gatewayService.forwardCommRequest('get', '/api/v1/channels', undefined, authorization, { userId });
+    return this.gatewayService.forwardCommRequest('get', '/channels', undefined, authorization, { userId });
   }
 
   @Get('channels/:id')
   getChannel(@Param('id') id: string, @Headers('authorization') authorization?: string) {
-    return this.gatewayService.forwardCommRequest('get', `/api/v1/channels/${id}`, undefined, authorization);
+    return this.gatewayService.forwardCommRequest('get', `/channels/${id}`, undefined, authorization);
   }
 
   // ==================== MESSAGES ====================
 
   @Post('messages')
   sendMessage(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string) {
-    return this.gatewayService.forwardCommRequest('post', '/api/v1/messages', body, authorization);
+    return this.gatewayService.forwardCommRequest('post', '/messages', body, authorization);
   }
 
   @Get('messages/:channelId')
   getMessages(@Param('channelId') channelId: string, @Headers('authorization') authorization?: string) {
-    return this.gatewayService.forwardCommRequest('get', `/api/v1/messages/${channelId}`, undefined, authorization);
+    return this.gatewayService.forwardCommRequest('get', `/messages/${channelId}`, undefined, authorization);
   }
 }
