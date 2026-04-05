@@ -338,4 +338,82 @@ export class GatewayController {
       throw new UnauthorizedException('authorization token is required');
     }
   }
+
+    // ==================== MEETINGS ====================
+
+  @Post('meetings')
+  createMeeting(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string) {
+    return this.gatewayService.forwardVideoRequest('post', '/api/v1/meetings', body, authorization);
+  }
+
+  @Get('meetings')
+  getMeetings(@Query('tenantId') tenantId: string | undefined, @Headers('authorization') authorization?: string) {
+    return this.gatewayService.forwardVideoRequest('get', '/api/v1/meetings', undefined, authorization, { tenantId });
+  }
+
+  @Get('meetings/:id')
+  getMeeting(@Param('id') id: string, @Headers('authorization') authorization?: string) {
+    return this.gatewayService.forwardVideoRequest('get', `/api/v1/meetings/${id}`, undefined, authorization);
+  }
+
+  @Post('meetings/:id/token')
+  getMeetingToken(@Param('id') id: string, @Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string) {
+    return this.gatewayService.forwardVideoRequest('post', `/api/v1/meetings/${id}/token`, body, authorization);
+  }
+
+  @Patch('meetings/:id/end')
+  endMeeting(@Param('id') id: string, @Headers('authorization') authorization?: string) {
+    return this.gatewayService.forwardVideoRequest('patch', `/api/v1/meetings/${id}/end`, undefined, authorization);
+  }
+
+  @Get('meetings/:id/summary')
+  getMeetingSummary(@Param('id') id: string, @Headers('authorization') authorization?: string) {
+    return this.gatewayService.forwardVideoRequest('get', `/api/v1/meetings/${id}/summary`, undefined, authorization);
+  }
+
+  // ==================== NOTIFICATIONS ====================
+
+  @Get('notifications')
+  getNotifications(@Query('userId') userId: string | undefined, @Headers('authorization') authorization?: string) {
+    return this.gatewayService.forwardCommRequest('get', '/api/v1/notifications', undefined, authorization, { userId });
+  }
+
+  @Post('notifications/:id/read')
+  markNotificationRead(@Param('id') id: string, @Headers('authorization') authorization?: string) {
+    return this.gatewayService.forwardCommRequest('post', `/api/v1/notifications/${id}/read`, undefined, authorization);
+  }
+
+  @Post('notifications/read-all')
+  markAllNotificationsRead(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string) {
+    return this.gatewayService.forwardCommRequest('post', '/api/v1/notifications/read-all', body, authorization);
+  }
+
+  // ==================== CHANNELS ====================
+
+  @Post('channels')
+  createChannel(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string) {
+    return this.gatewayService.forwardCommRequest('post', '/api/v1/channels', body, authorization);
+  }
+
+  @Get('channels')
+  getChannels(@Query('userId') userId: string | undefined, @Headers('authorization') authorization?: string) {
+    return this.gatewayService.forwardCommRequest('get', '/api/v1/channels', undefined, authorization, { userId });
+  }
+
+  @Get('channels/:id')
+  getChannel(@Param('id') id: string, @Headers('authorization') authorization?: string) {
+    return this.gatewayService.forwardCommRequest('get', `/api/v1/channels/${id}`, undefined, authorization);
+  }
+
+  // ==================== MESSAGES ====================
+
+  @Post('messages')
+  sendMessage(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string) {
+    return this.gatewayService.forwardCommRequest('post', '/api/v1/messages', body, authorization);
+  }
+
+  @Get('messages/:channelId')
+  getMessages(@Param('channelId') channelId: string, @Headers('authorization') authorization?: string) {
+    return this.gatewayService.forwardCommRequest('get', `/api/v1/messages/${channelId}`, undefined, authorization);
+  }
 }

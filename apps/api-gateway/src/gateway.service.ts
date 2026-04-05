@@ -5,6 +5,8 @@ import axios, { AxiosError, Method } from 'axios';
 export class GatewayService {
   private readonly authServiceUrl = process.env.AUTH_SERVICE_URL ?? 'http://localhost:3001';
   private readonly projectServiceUrl = process.env.PROJECT_SERVICE_URL ?? 'http://localhost:3003';
+  private readonly commServiceUrl = process.env.COMM_SERVICE_URL ?? 'http://communication-service:3004';
+  private readonly videoServiceUrl = process.env.VIDEO_SERVICE_URL ?? 'http://video-service:3005';
 
   health(): Record<string, unknown> {
     return {
@@ -13,42 +15,17 @@ export class GatewayService {
       dependencies: {
         authServiceUrl: this.authServiceUrl,
         projectServiceUrl: this.projectServiceUrl,
+        commServiceUrl: this.commServiceUrl,
+        videoServiceUrl: this.videoServiceUrl,
       },
     };
   }
 
-  async forwardAuthRequest<T>(
+  private async forward<T>(
     method: Method,
+    baseUrl: string,
     path: string,
-    body?: Record<string, unknown>,
-    authorization?: string,
-  ): Promise<T> {
-    try {
-      const response = await axios.request<T>({
-        method,
-        url: `${this.authServiceUrl}${path}`,
-        data: body ?? {},
-        headers: authorization ? { authorization } : undefined,
-      });
-      return response.data;
-    } catch (error) {
-      const axiosError = error as AxiosError<{ message?: string }>;
-      if (axiosError.response?.status) {
-        throw new HttpException(
-          axiosError.response.data?.message ?? 'auth-service request failed',
-          axiosError.response.status,
-        );
-      }
-
-      throw new ServiceUnavailableException(
-        axiosError.response?.data?.message ?? 'auth-service unavailable',
-      );
-    }
-  }
-
-  async forwardProjectRequest<T>(
-    method: Method,
-    path: string,
+    serviceName: string,
     body?: Record<string, unknown>,
     authorization?: string,
     params?: Record<string, string | undefined>,
@@ -56,7 +33,7 @@ export class GatewayService {
     try {
       const response = await axios.request<T>({
         method,
-        url: `${this.projectServiceUrl}${path}`,
+        url: `${baseUrl}${path}`,
         data: body ?? {},
         params,
         headers: authorization ? { authorization } : undefined,
@@ -66,33 +43,33 @@ export class GatewayService {
       const axiosError = error as AxiosError<{ message?: string }>;
       if (axiosError.response?.status) {
         throw new HttpException(
-          axiosError.response.data?.message ?? 'project-service request failed',
+          axiosError.response.data?.message ?? `${serviceName} request failed`,
           axiosError.response.status,
         );
       }
-
       throw new ServiceUnavailableException(
-        axiosError.response?.data?.message ?? 'project-service unavailable',
+        axiosError.response?.data?.message ?? `${serviceName} unavailable`,
       );
     }
   }
 
-  async forwardAuthHealth<T>(): Promise<T> {
-    try {
-      const response = await axios.get<T>(`${this.authServiceUrl}/api/v1/auth/health`);
-      return response.data;
-    } catch (error) {
-      const axiosError = error as AxiosError<{ message?: string }>;
-      if (axiosError.response?.status) {
-        throw new HttpException(
-          axiosError.response.data?.message ?? 'auth-service request failed',
-          axiosError.response.status,
-        );
-      }
+  async forwardAuthRequest<T>(method: Method, path: string, body?: Record<string, unknown>, authorization?: string): Promise<T> {
+    return this.forward<T>(method, this.authServiceUrl, path, 'auth-service', body, authorization);
+  }
 
-      throw new ServiceUnavailableException(
-        axiosError.response?.data?.message ?? 'auth-service unavailable',
-      );
-    }
+  async forwardProjectRequest<T>(method: Method, path: string, body?: Record<string, unknown>, authorization?: string, params?: Record<string, string | undefined>): Promise<T> {
+    return this.forward<T>(method, this.projectServiceUrl, path, 'project-service', body, authorization, params);
+  }
+
+  async forwardCommRequest<T>(method: Method, path: string, body?: Record<string, unknown>, authorization?: string, params?: Record<string, string | undefined>): Promise<T> {
+    return this.forward<T>(method, this.commServiceUrl, path, 'communication-service', body, authorization, params);
+  }
+
+  async forwardVideoRequest<T>(method: Method, path: string, body?: Record<string, unknown>, authorization?: string, params?: Record<string, string | undefined>): Promise<T> {
+    return this.forward<T>(method, this.videoServiceUrl, path, 'video-service', body, authorization, params);
+  }
+
+  async forwardAuthHealth<T>(): Promise<T> {
+    return this.forward<T>('get', this.authServiceUrl, '/api/v1/auth/health', 'auth-service');
   }
 }
