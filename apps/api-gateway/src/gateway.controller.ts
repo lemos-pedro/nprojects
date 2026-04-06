@@ -1,4 +1,4 @@
-import { Res,
+import {
   Body,
   Controller,
   Delete,
@@ -9,11 +9,12 @@ import { Res,
   Patch,
   Post,
   Query,
+  Res,
   UnauthorizedException,
 } from '@nestjs/common';
 import { Response } from 'express';
 
-import { Res, GatewayService } from './gateway.service';
+import { GatewayService } from './gateway.service';
 
 @Controller('api/v1')
 export class GatewayController {
@@ -50,6 +51,27 @@ export class GatewayController {
   @Post('auth/logout')
   logout(@Body() body: Record<string, unknown>) {
     return this.gatewayService.forwardAuthRequest('post', '/auth/logout', body);
+  }
+
+  @Get('auth/google')
+  async googleLogin(@Res() res: Response) {
+    const authServiceUrl = process.env.AUTH_SERVICE_URL ?? 'http://auth-service:3001';
+    return res.redirect(`${authServiceUrl}/api/v1/auth/google`);
+  }
+
+  @Get('auth/google/callback')
+  async googleCallback(
+    @Query('code') code: string,
+    @Query('error') error: string,
+    @Query('state') state: string,
+    @Res() res: Response,
+  ) {
+    const authServiceUrl = process.env.AUTH_SERVICE_URL ?? 'http://auth-service:3001';
+    const params = new URLSearchParams();
+    if (code) params.set('code', code);
+    if (error) params.set('error', error);
+    if (state) params.set('state', state);
+    return res.redirect(`${authServiceUrl}/api/v1/auth/google/callback?${params.toString()}`);
   }
 
   @Get('me')
@@ -340,7 +362,7 @@ export class GatewayController {
     }
   }
 
-    // ==================== MEETINGS ====================
+  // ==================== MEETINGS ====================
 
   @Post('meetings')
   createMeeting(@Body() body: Record<string, unknown>, @Headers('authorization') authorization?: string) {
