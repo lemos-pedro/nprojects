@@ -122,7 +122,7 @@ services:
       VIDEO_SERVICE_PORT: 3005
       LIVEKIT_HOST: livekit
       LIVEKIT_API_URL: http://livekit:7880
-      LIVEKIT_URL: ws://localhost:7880
+      LIVEKIT_URL: ws://livekit:7880
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-devsecret}
       PROJECT_SERVICE_URL: http://project-service:3003/api/v1
@@ -158,8 +158,9 @@ services:
           tcp_port: 7881
           port_range_start: 50000
           port_range_end: 50100
-          use_external_ip: false
+          use_external_ip: true
           enable_loopback_candidate: true
+          node_ip: 13.60.127.38
         turn:
           enabled: true
           udp_port: 3478

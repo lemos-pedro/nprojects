@@ -473,6 +473,64 @@ export class AuthService {
     };
   }
 
+    async loginWithGoogle(googleEmail: string, googleName: string): Promise<{ user: SafeAuthUser; tokens: AuthTokens }> {
+  const email = googleEmail.trim().toLowerCase();
+
+  if (this.usePostgres) {
+    // Tentar encontrar user existente
+    let user = await this.findUserByEmail(email);
+
+    if (!user) {
+      // Primeiro login com Google — criar tenant + user automaticamente
+      const tenantName = `${googleName.trim()} Workspace`;
+      const tenantSlug = `${this.slugify(tenantName)}-${randomUUID().slice(0, 8)}`;
+
+      const createdUser = await withTransaction(async (client: PoolClient) => {
+        const tenantResult = await client.query<{ id: string }>(
+          `INSERT INTO tenants (name, slug, industry_vertical, plan, timezone, locale)
+           VALUES ($1, $2, 'other', 'starter', 'Africa/Luanda', 'pt-AO')
+           RETURNING id`,
+          [tenantName, tenantSlug],
+        );
+
+        // password_hash vazio — user Google nunca usa password
+        const userResult = await client.query<DatabaseUserRow>(
+          `INSERT INTO users (tenant_id, email, password_hash, full_name, two_factor_enabled, metadata)
+           VALUES ($1, $2, '', $3, FALSE, '{"provider": "google"}'::jsonb)
+           RETURNING id, tenant_id, email, full_name, password_hash, two_factor_enabled, two_factor_secret, metadata, created_at`,
+          [tenantResult.rows[0].id, email, googleName.trim()],
+        );
+
+        return this.mapDatabaseUser(userResult.rows[0]);
+      });
+
+      user = createdUser;
+    }
+
+    const tokens = await this.issueTokens(user.id);
+    return { user: this.sanitizeUser(user), tokens };
+  }
+
+  // Fallback memória (dev sem postgres)
+  let user = [...this.users.values()].find(u => u.email === email);
+
+  if (!user) {
+    user = {
+      id: randomUUID(),
+      tenantId: randomUUID(),
+      email,
+      fullName: googleName.trim(),
+      passwordHash: '',
+      twoFactorEnabled: false,
+      createdAt: new Date().toISOString(),
+    };
+    this.users.set(user.id, user);
+  }
+
+  const tokens = await this.issueTokens(user.id);
+  return { user: this.sanitizeUser(user), tokens };
+}
+
   health(): Record<string, unknown> {
     return {
       service: 'auth-service',
