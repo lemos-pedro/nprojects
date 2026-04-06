@@ -1,4 +1,4 @@
-import {
+import { Res,
   Body,
   Controller,
   Delete,
@@ -11,8 +11,9 @@ import {
   Query,
   UnauthorizedException,
 } from '@nestjs/common';
+import { Response } from 'express';
 
-import { GatewayService } from './gateway.service';
+import { Res, GatewayService } from './gateway.service';
 
 @Controller('api/v1')
 export class GatewayController {
