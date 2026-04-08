@@ -53,8 +53,21 @@ export class GatewayService {
     }
   }
 
-  async forwardAuthRequest<T>(method: Method, path: string, body?: Record<string, unknown>, authorization?: string): Promise<T> {
-    return this.forward<T>(method, this.authServiceUrl, path, 'auth-service', body, authorization);
+  async forwardAuthRequest<T>(
+    method: Method, 
+    path: string, 
+    body?: Record<string, unknown>, 
+    authorization?: string
+  ): Promise<T> {
+    // Adiciona /api/v1 automaticamente se não existir
+    let fullPath = path;
+    if (!fullPath.startsWith('/api/v1')) {
+      fullPath = fullPath.startsWith('/') 
+        ? `/api/v1${fullPath}` 
+        : `/api/v1/${fullPath}`;
+    }
+
+    return this.forward<T>(method, this.authServiceUrl, fullPath, 'auth-service', body, authorization);
   }
 
   async forwardProjectRequest<T>(method: Method, path: string, body?: Record<string, unknown>, authorization?: string, params?: Record<string, string | undefined>): Promise<T> {

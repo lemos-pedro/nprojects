@@ -12,7 +12,8 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
-      - backend
+     - backend
+
     healthcheck:
       test:
         [
@@ -44,7 +45,7 @@ services:
       postgres:
         condition: service_healthy
     networks:
-      - backend
+     - backend
 
   redis:
     image: redis:7-alpine
@@ -53,7 +54,8 @@ services:
     ports:
       - '${REDIS_HOST_PORT:-6380}:6379'
     networks:
-      - backend
+     - backend
+
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 10s
@@ -62,8 +64,8 @@ services:
 
 networks:
   backend:
+    external: true
     name: ngola-backend-network
-    driver: bridge
 
 volumes:
   postgres_data:

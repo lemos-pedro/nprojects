@@ -53,7 +53,7 @@ services:
     ports:
       - '3001:3001'
     networks:
-      - backend
+     - backend
 
   api-gateway:
     build:
@@ -78,7 +78,7 @@ services:
     ports:
       - '3000:3000'
     networks:
-      - backend
+     - backend
 
   communication-service:
     build:
@@ -105,7 +105,7 @@ services:
     ports:
       - '3004:3004'
     networks:
-      - backend
+     - backend
 
   video-service:
     build:
@@ -136,7 +136,7 @@ services:
     ports:
       - '3005:3005'
     networks:
-      - backend
+     - backend
 
   livekit:
     image: livekit/livekit-server
