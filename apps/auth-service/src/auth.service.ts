@@ -82,7 +82,7 @@ export class AuthService {
     { id: string; tenantId: string; name: string; description?: string; createdBy: string }
   >();
 
-  async register(payload: RegisterPayload): Promise<SafeAuthUser> {
+  async register(payload: RegisterPayload): Promise<{ user: SafeAuthUser; tokens: AuthTokens }> {
     if (!payload.email || !payload.password || !payload.fullName) {
       throw new BadRequestException('email, password and fullName are required');
     }
@@ -108,7 +108,8 @@ export class AuthService {
     };
 
     this.users.set(user.id, user);
-    return this.sanitizeUser(user);
+    const tokens = await this.issueTokens(user.id);
+    return { user: this.sanitizeUser(user), tokens };
   }
 
   async login(payload: LoginPayload): Promise<{ user: SafeAuthUser; tokens: AuthTokens }> {
@@ -541,7 +542,7 @@ export class AuthService {
     };
   }
 
-  private async registerWithPostgres(payload: RegisterPayload): Promise<SafeAuthUser> {
+  private async registerWithPostgres(payload: RegisterPayload): Promise<{ user: SafeAuthUser; tokens: AuthTokens }> {
     const email = payload.email.trim().toLowerCase();
     const existing = await query<{ id: string }>('SELECT id FROM users WHERE email = $1 LIMIT 1', [email]);
 
