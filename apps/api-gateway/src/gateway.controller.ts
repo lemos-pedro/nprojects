@@ -101,8 +101,26 @@ export class GatewayController {
   }
 
   @Get('users')
-  getUsers(@Headers('authorization') authorization?: string) {
-    return this.gatewayService.forwardAuthRequest('get', '/users', undefined, authorization);
+  getUsers(
+    @Query('teamId') teamId: string | undefined,
+    @Headers('authorization') authorization?: string,
+  ) {
+    return this.gatewayService.forwardAuthRequest('get', '/users', undefined, authorization, { teamId });
+  }
+
+  @Get('teams')
+  getTeams(@Headers('authorization') authorization?: string) {
+    return this.gatewayService.forwardAuthRequest('get', '/teams', undefined, authorization);
+  }
+
+  @Get('teams/:teamId/members')
+  getTeamMembers(@Param('teamId') teamId: string, @Headers('authorization') authorization?: string) {
+    return this.gatewayService.forwardAuthRequest(
+      'get',
+      `/teams/${teamId}/members`,
+      undefined,
+      authorization,
+    );
   }
 
   @Post('team/invite-link')

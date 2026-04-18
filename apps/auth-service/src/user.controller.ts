@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 
 import { AuthGuard } from './auth.guard';
 import { AuthService, SafeAuthUser } from './auth.service';
@@ -16,8 +16,20 @@ export class UserController {
 
   @UseGuards(AuthGuard)
   @Get('users')
-  getUsers(@CurrentUser() user: SafeAuthUser) {
-    return this.authService.getUsersByTenant(user.tenantId);
+  getUsers(@CurrentUser() user: SafeAuthUser, @Query('teamId') teamId?: string) {
+    return this.authService.getUsersByTenant(user.tenantId, teamId);
+  }
+
+  @UseGuards(AuthGuard)
+  @Get('teams')
+  getTeams(@CurrentUser() user: SafeAuthUser) {
+    return this.authService.listTeamsForUser(user);
+  }
+
+  @UseGuards(AuthGuard)
+  @Get('teams/:teamId/members')
+  getTeamMembers(@CurrentUser() user: SafeAuthUser, @Param('teamId') teamId: string) {
+    return this.authService.getTeamMembers(user, teamId);
   }
 
   @UseGuards(AuthGuard)

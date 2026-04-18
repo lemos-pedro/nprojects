@@ -65,7 +65,8 @@ export class GatewayService {
     method: Method, 
     path: string, 
     body?: Record<string, unknown>, 
-    authorization?: string
+    authorization?: string,
+    params?: Record<string, string | undefined>,
   ): Promise<T> {
     // Adiciona /api/v1 automaticamente se não existir
     let fullPath = path;
@@ -75,7 +76,7 @@ export class GatewayService {
         : `/api/v1/${fullPath}`;
     }
 
-    return this.forward<T>(method, this.authServiceUrl, fullPath, 'auth-service', body, authorization);
+    return this.forward<T>(method, this.authServiceUrl, fullPath, 'auth-service', body, authorization, params);
   }
 
   async forwardProjectRequest<T>(method: Method, path: string, body?: Record<string, unknown>, authorization?: string, params?: Record<string, string | undefined>): Promise<T> {

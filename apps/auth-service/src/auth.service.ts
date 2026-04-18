@@ -14,6 +14,9 @@ import axios from 'axios';
 import { query, isPostgresEnabled, withTransaction } from '@ngola/database';
 
 import {
+  TeamMemberSummary,
+  TeamMembership,
+  TeamSummary,
   AuthSession,
   AuthTokens,
   AuthUser,
@@ -66,6 +69,41 @@ interface MemoryTeamInvite {
   status: 'pending' | 'accepted' | 'expired' | 'revoked';
 }
 
+interface MemoryTeam {
+  id: string;
+  tenantId: string;
+  name: string;
+  description?: string;
+  createdBy: string;
+  createdAt: string;
+}
+
+interface MemoryTeamMember {
+  teamId: string;
+  userId: string;
+  role: InviteRole | 'owner';
+  joinedAt: string;
+}
+
+interface DatabaseTeamMembershipRow {
+  team_id: string;
+  team_name: string;
+  user_id: string;
+  role: InviteRole | 'owner';
+  joined_at: string | null;
+}
+
+interface DatabaseTeamRow {
+  id: string;
+  tenant_id: string;
+  name: string;
+  description: string | null;
+  created_by: string;
+  created_at: string;
+  role: InviteRole | 'owner';
+  member_count: number;
+}
+
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
@@ -74,10 +112,13 @@ export class AuthService {
   private readonly refreshSecret = process.env.AUTH_JWT_REFRESH_SECRET ?? 'dev-refresh-secret';
   private readonly accessTtl = Number(process.env.AUTH_ACCESS_TOKEN_TTL ?? 900);
   private readonly refreshTtl = Number(process.env.AUTH_REFRESH_TOKEN_TTL ?? 604800);
+  private readonly inviteCodeLength = this.resolveInviteCodeLength();
   private readonly users = new Map<string, AuthUser>();
   private readonly usersByEmail = new Map<string, string>();
   private readonly sessions = new Map<string, AuthSession>();
   private readonly teamInvites = new Map<string, MemoryTeamInvite>();
+  private readonly teams = new Map<string, MemoryTeam>();
+  private readonly teamMembers = new Map<string, MemoryTeamMember[]>();
 
   async register(payload: RegisterPayload): Promise<{ user: SafeAuthUser; tokens: AuthTokens }> {
     if (!payload.email || !payload.password || !payload.fullName) {
@@ -164,30 +205,187 @@ export class AuthService {
     return this.sanitizeUser(user);
   }
 
-  async getUsersByTenant(tenantId: string): Promise<SafeAuthUser[]> {
+  async getUsersByTenant(tenantId: string, teamId?: string): Promise<SafeAuthUser[]> {
     if (!this.usePostgres) {
-      return Array.from(this.users.values())
-        .filter(user => user.tenantId === tenantId)
-        .map(user => this.sanitizeUser(user));
+      return this.buildUsersWithTeamMembership(
+        Array.from(this.users.values()).filter(user =>
+          teamId ? this.isUserInMemoryTeam(user.id, teamId) : user.tenantId === tenantId,
+        ),
+        tenantId,
+        teamId,
+      );
     }
 
-    const result = await query<DatabaseUserRow>(
-      `SELECT DISTINCT u.id, u.tenant_id, u.email, u.full_name, u.password_hash,
-              u.two_factor_enabled, u.two_factor_secret, u.metadata, u.created_at
-       FROM users u
-       WHERE u.tenant_id = $1
-       UNION
-       SELECT DISTINCT u.id, u.tenant_id, u.email, u.full_name, u.password_hash,
-              u.two_factor_enabled, u.two_factor_secret, u.metadata, u.created_at
-       FROM users u
-       INNER JOIN team_members tm ON tm.user_id = u.id
-       INNER JOIN teams t ON t.id = tm.team_id
-       WHERE t.tenant_id = $1
-       ORDER BY created_at ASC`,
-      [tenantId],
+    const result = teamId
+      ? await query<DatabaseUserRow>(
+          `SELECT DISTINCT u.id, u.tenant_id, u.email, u.full_name, u.password_hash,
+                  u.two_factor_enabled, u.two_factor_secret, u.metadata, u.created_at
+           FROM users u
+           INNER JOIN (
+             SELECT tm.user_id
+             FROM team_members tm
+             INNER JOIN teams t ON t.id = tm.team_id
+             WHERE t.tenant_id = $1 AND tm.team_id = $2
+             UNION
+             SELECT t.created_by
+             FROM teams t
+             WHERE t.tenant_id = $1 AND t.id = $2
+           ) visible_users ON visible_users.user_id = u.id
+           ORDER BY u.created_at ASC`,
+          [tenantId, teamId],
+        )
+      : await query<DatabaseUserRow>(
+          `SELECT DISTINCT u.id, u.tenant_id, u.email, u.full_name, u.password_hash,
+                  u.two_factor_enabled, u.two_factor_secret, u.metadata, u.created_at
+           FROM users u
+           WHERE u.tenant_id = $1
+           UNION
+           SELECT DISTINCT u.id, u.tenant_id, u.email, u.full_name, u.password_hash,
+                  u.two_factor_enabled, u.two_factor_secret, u.metadata, u.created_at
+           FROM users u
+           INNER JOIN team_members tm ON tm.user_id = u.id
+           INNER JOIN teams t ON t.id = tm.team_id
+           WHERE t.tenant_id = $1
+           ORDER BY created_at ASC`,
+          [tenantId],
+        );
+
+    return this.buildUsersWithTeamMembership(
+      result.rows.map(row => this.mapDatabaseUser(row)),
+      tenantId,
+      teamId,
+    );
+  }
+
+  async listTeamsForUser(currentUser: SafeAuthUser): Promise<TeamSummary[]> {
+    if (!this.usePostgres) {
+      return Array.from(this.teams.values())
+        .filter(
+          team =>
+            team.tenantId === currentUser.tenantId &&
+            (team.createdBy === currentUser.id || this.isUserInMemoryTeam(currentUser.id, team.id)),
+        )
+        .map(team => ({
+          id: team.id,
+          tenantId: team.tenantId,
+          name: team.name,
+          description: team.description,
+          createdBy: team.createdBy,
+          createdAt: team.createdAt,
+          role: team.createdBy === currentUser.id ? 'owner' : this.getMemoryTeamRole(team.id, currentUser.id) ?? 'member',
+          memberCount: this.getMemoryTeamMemberCount(team.id),
+        }));
+    }
+
+    const result = await query<DatabaseTeamRow>(
+      `SELECT t.id, t.tenant_id, t.name, t.description, t.created_by, t.created_at,
+              COALESCE(tm.role::text, CASE WHEN t.created_by = $1 THEN 'owner' END) AS role,
+              (
+                SELECT COUNT(*)::int
+                FROM (
+                  SELECT tm2.user_id
+                  FROM team_members tm2
+                  WHERE tm2.team_id = t.id
+                  UNION
+                  SELECT t.created_by
+                ) team_users
+              ) AS member_count
+       FROM teams t
+       LEFT JOIN team_members tm ON tm.team_id = t.id AND tm.user_id = $1
+       WHERE t.tenant_id = $2
+         AND (tm.user_id IS NOT NULL OR t.created_by = $1)
+       ORDER BY t.created_at ASC`,
+      [currentUser.id, currentUser.tenantId],
     );
 
-    return result.rows.map(row => this.sanitizeUser(this.mapDatabaseUser(row)));
+    return result.rows.map(row => ({
+      id: row.id,
+      tenantId: row.tenant_id,
+      name: row.name,
+      description: row.description ?? undefined,
+      createdBy: row.created_by,
+      createdAt: row.created_at,
+      role: row.role,
+      memberCount: row.member_count,
+    }));
+  }
+
+  async getTeamMembers(
+    currentUser: SafeAuthUser,
+    teamId: string,
+  ): Promise<{ teamId: string; members: TeamMemberSummary[] }> {
+    if (!this.usePostgres) {
+      const team = this.teams.get(teamId);
+      if (!team || team.tenantId !== currentUser.tenantId) {
+        throw new NotFoundException('team not found');
+      }
+
+      return {
+        teamId,
+        members: this.listMemoryTeamMembers(teamId),
+      };
+    }
+
+    const teamResult = await query<{ id: string }>(
+      `SELECT id
+       FROM teams
+       WHERE id = $1 AND tenant_id = $2
+       LIMIT 1`,
+      [teamId, currentUser.tenantId],
+    );
+
+    if (!teamResult.rows[0]) {
+      throw new NotFoundException('team not found');
+    }
+
+    const result = await query<{
+      user_id: string;
+      email: string;
+      full_name: string;
+      role: InviteRole | 'owner';
+      joined_at: string | null;
+    }>(
+      `SELECT DISTINCT ON (team_users.user_id)
+              team_users.user_id,
+              team_users.email,
+              team_users.full_name,
+              team_users.role,
+              team_users.joined_at
+       FROM (
+         SELECT u.id AS user_id,
+                u.email,
+                u.full_name,
+                'owner'::text AS role,
+                t.created_at AS joined_at,
+                1 AS precedence
+         FROM teams t
+         INNER JOIN users u ON u.id = t.created_by
+         WHERE t.id = $1
+         UNION ALL
+         SELECT u.id AS user_id,
+                u.email,
+                u.full_name,
+                tm.role::text AS role,
+                tm.joined_at,
+                0 AS precedence
+         FROM team_members tm
+         INNER JOIN users u ON u.id = tm.user_id
+         WHERE tm.team_id = $1
+       ) team_users
+       ORDER BY team_users.user_id, team_users.precedence DESC, team_users.joined_at ASC`,
+      [teamId],
+    );
+
+    return {
+      teamId,
+      members: result.rows.map(row => ({
+        userId: row.user_id,
+        email: row.email,
+        fullName: row.full_name,
+        role: row.role,
+        joinedAt: row.joined_at ?? undefined,
+      })),
+    };
   }
 
   async createTeamInviteLink(currentUser: SafeAuthUser, payload: TeamInvitePayload) {
@@ -200,25 +398,19 @@ export class AuthService {
     const expiresInDays = this.normalizeExpiresInDays(payload.expiresInDays);
     const expiresAt = new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000);
     const email = payload.email?.trim().toLowerCase();
-    const token = this.generateInviteToken();
 
     if (!payload.teamId && !requestedTeamName) {
       throw new BadRequestException('teamId or teamName is required');
     }
 
-    const joinBase = (process.env.TEAM_JOIN_BASE_URL ?? 'http://localhost:8080/register').replace(
-      /\/+$/,
-      '',
-    );
-    const inviteUrl = `${joinBase}?inviteToken=${token}`;
-
     const team = await withTransaction(async (client: PoolClient) => {
+      const token = await this.generateInviteTokenWithClient(client);
       let teamId = payload.teamId;
       let teamName = requestedTeamName ?? '';
 
       if (teamId) {
-        const teamResult = await client.query<{ id: string; name: string }>(
-          `SELECT id, name
+        const teamResult = await client.query<{ id: string; name: string; created_by: string }>(
+          `SELECT id, name, created_by
            FROM teams
            WHERE id = $1 AND tenant_id = $2
            LIMIT 1`,
@@ -229,29 +421,65 @@ export class AuthService {
           throw new NotFoundException('team not found in this tenant');
         }
 
+        if (teamResult.rows[0].created_by !== currentUser.id) {
+          const membership = await client.query<{ role: InviteRole }>(
+            `SELECT role
+             FROM team_members
+             WHERE team_id = $1 AND user_id = $2
+             LIMIT 1`,
+            [teamId, currentUser.id],
+          );
+
+          if (!membership.rows[0]) {
+            throw new UnauthorizedException('only team members can create invites for this team');
+          }
+        }
+
         teamName = teamResult.rows[0].name;
       } else {
-        const createdTeam = await client.query<{ id: string; name: string }>(
+        const createdTeam = await client.query<{ id: string; name: string; created_at: string }>(
           `INSERT INTO teams (tenant_id, name, description, created_by)
            VALUES ($1, $2, $3, $4)
-           RETURNING id, name`,
+           RETURNING id, name, created_at`,
           [currentUser.tenantId, requestedTeamName, payload.description ?? null, currentUser.id],
         );
         teamId = createdTeam.rows[0].id;
         teamName = createdTeam.rows[0].name;
+
+        await client.query(
+          `INSERT INTO team_members (team_id, user_id, role, joined_at)
+           VALUES ($1, $2, 'owner'::member_role, $3)
+           ON CONFLICT (team_id, user_id) DO NOTHING`,
+          [teamId, currentUser.id, createdTeam.rows[0].created_at],
+        );
       }
 
       await client.query(
         `INSERT INTO invitations (tenant_id, invited_by, email, role, team_id, token, expires_at)
          VALUES ($1, $2, $3, $4::member_role, $5, $6, $7)`,
-        [currentUser.tenantId, currentUser.id, email ?? `pending+${token.slice(0, 8)}@invite.local`, role, teamId, token, expiresAt.toISOString()],
+        [
+          currentUser.tenantId,
+          currentUser.id,
+          email ?? `pending+${token}@invite.local`,
+          role,
+          teamId,
+          token,
+          expiresAt.toISOString(),
+        ],
       );
 
-      return { id: teamId, name: teamName };
+      return { id: teamId, name: teamName, token };
     });
 
+    const joinBase = (process.env.TEAM_JOIN_BASE_URL ?? 'http://localhost:8080/register').replace(
+      /\/+$/,
+      '',
+    );
+    const inviteUrl = `${joinBase}?inviteToken=${team.token}`;
+
     const response = {
-      token,
+      token: team.token,
+      inviteCode: team.token,
       inviteUrl,
       teamId: team.id,
       teamName: team.name,
@@ -265,6 +493,7 @@ export class AuthService {
       inviteUrl,
       teamName: team.name,
       role,
+      inviteCode: team.token,
       expiresAt: expiresAt.toISOString(),
     });
 
@@ -648,12 +877,29 @@ export class AuthService {
     const token = this.generateInviteToken();
     const email = payload.email?.trim().toLowerCase();
     const teamId = payload.teamId ?? randomUUID();
-    const teamName = payload.teamName?.trim() || `Team ${teamId.slice(0, 8)}`;
+    const existingTeam = payload.teamId ? this.teams.get(payload.teamId) : undefined;
+    if (payload.teamId && !existingTeam) {
+      throw new NotFoundException('team not found in this tenant');
+    }
+
+    const teamName = payload.teamName?.trim() || existingTeam?.name || `Team ${teamId.slice(0, 8)}`;
     const joinBase = (process.env.TEAM_JOIN_BASE_URL ?? 'http://localhost:8080/register').replace(
       /\/+$/,
       '',
     );
     const inviteUrl = `${joinBase}?inviteToken=${token}`;
+
+    if (!payload.teamId) {
+      this.teams.set(teamId, {
+        id: teamId,
+        tenantId: currentUser.tenantId,
+        name: teamName,
+        description: payload.description,
+        createdBy: currentUser.id,
+        createdAt: new Date().toISOString(),
+      });
+      this.upsertMemoryTeamMember(teamId, currentUser.id, 'owner');
+    }
 
     this.teamInvites.set(token, {
       token,
@@ -669,6 +915,7 @@ export class AuthService {
 
     return {
       token,
+      inviteCode: token,
       inviteUrl,
       teamId,
       teamName,
@@ -717,6 +964,7 @@ export class AuthService {
     }
 
     this.saveMemoryUser(user);
+    this.upsertMemoryTeamMember(invite.teamId, user.id, invite.role);
     invite.status = 'accepted';
     invite.acceptedAt = new Date().toISOString();
 
@@ -759,7 +1007,11 @@ export class AuthService {
   }
 
   private generateInviteToken(): string {
-    return `${randomUUID().replace(/-/g, '')}${randomUUID().replace(/-/g, '')}`;
+    let token = '';
+    do {
+      token = this.generateNumericCode();
+    } while (this.teamInvites.has(token));
+    return token;
   }
 
   private async sendTeamInviteEmailIfConfigured(input: {
@@ -767,6 +1019,7 @@ export class AuthService {
     inviteUrl: string;
     teamName: string;
     role: InviteRole;
+    inviteCode: string;
     expiresAt: string;
   }): Promise<void> {
     if (!input.email) return;
@@ -783,6 +1036,7 @@ export class AuthService {
       `Olá,`,
       ``,
       `Você foi convidado para a equipa "${input.teamName}" com o papel "${input.role}".`,
+      `Código de convite: ${input.inviteCode}`,
       `Use este link para entrar: ${input.inviteUrl}`,
       `Expira em: ${new Date(input.expiresAt).toLocaleString('pt-PT')}`,
       ``,
@@ -793,6 +1047,7 @@ export class AuthService {
       <div style="font-family:Arial,sans-serif;line-height:1.5;color:#0f172a">
         <h2 style="margin:0 0 12px">Convite de equipa</h2>
         <p>Você foi convidado para a equipa <strong>${this.escapeHtml(input.teamName)}</strong> com o papel <strong>${this.escapeHtml(input.role)}</strong>.</p>
+        <p><strong>Código do convite:</strong> <code>${this.escapeHtml(input.inviteCode)}</code></p>
         <p><a href="${input.inviteUrl}" style="display:inline-block;padding:10px 14px;background:#185FA5;color:#fff;text-decoration:none;border-radius:8px">Entrar na equipa</a></p>
         <p>Ou copie e cole este link no browser:</p>
         <p><code>${this.escapeHtml(input.inviteUrl)}</code></p>
@@ -953,5 +1208,193 @@ export class AuthService {
         role: invite.role,
       };
     });
+  }
+
+  private async generateInviteTokenWithClient(client: PoolClient): Promise<string> {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const token = this.generateNumericCode();
+      const existing = await client.query<{ token: string }>(
+        `SELECT token
+         FROM invitations
+         WHERE token = $1
+         LIMIT 1`,
+        [token],
+      );
+      if (!existing.rows[0]) {
+        return token;
+      }
+    }
+
+    throw new Error('failed to generate a unique invite token');
+  }
+
+  private generateNumericCode(): string {
+    let value = '';
+    for (let i = 0; i < this.inviteCodeLength; i += 1) {
+      value += Math.floor(Math.random() * 10).toString();
+    }
+    return value;
+  }
+
+  private resolveInviteCodeLength(): 6 | 8 {
+    const raw = Number(process.env.TEAM_INVITE_CODE_LENGTH ?? 8);
+    return raw === 6 ? 6 : 8;
+  }
+
+  private buildUsersWithTeamMembership(
+    users: AuthUser[],
+    tenantId: string,
+    teamId?: string,
+  ): SafeAuthUser[] {
+    const membershipMap = this.usePostgres
+      ? undefined
+      : this.buildMemoryMembershipMap(tenantId, teamId);
+
+    if (!this.usePostgres && membershipMap) {
+      return users.map(user => this.attachMemberships(this.sanitizeUser(user), membershipMap.get(user.id) ?? []));
+    }
+
+    return users;
+  }
+
+  private attachMemberships(user: SafeAuthUser, teams: TeamMembership[]): SafeAuthUser {
+    if (teams.length === 0) {
+      return user;
+    }
+
+    return {
+      ...user,
+      teams,
+    };
+  }
+
+  private buildMemoryMembershipMap(
+    tenantId: string,
+    teamId?: string,
+  ): Map<string, TeamMembership[]> {
+    const memberships = new Map<string, TeamMembership[]>();
+
+    for (const team of this.teams.values()) {
+      if (team.tenantId !== tenantId) {
+        continue;
+      }
+      if (teamId && team.id !== teamId) {
+        continue;
+      }
+
+      this.pushMembership(memberships, team.createdBy, {
+        id: team.id,
+        name: team.name,
+        role: 'owner',
+        joinedAt: team.createdAt,
+      });
+
+      for (const member of this.teamMembers.get(team.id) ?? []) {
+        if (member.userId === team.createdBy && member.role === 'owner') {
+          continue;
+        }
+        this.pushMembership(memberships, member.userId, {
+          id: team.id,
+          name: team.name,
+          role: member.role,
+          joinedAt: member.joinedAt,
+        });
+      }
+    }
+
+    return memberships;
+  }
+
+  private pushMembership(
+    memberships: Map<string, TeamMembership[]>,
+    userId: string,
+    membership: TeamMembership,
+  ): void {
+    const existing = memberships.get(userId) ?? [];
+    if (!existing.some(team => team.id === membership.id)) {
+      existing.push(membership);
+      memberships.set(userId, existing);
+    }
+  }
+
+  private isUserInMemoryTeam(userId: string, teamId: string): boolean {
+    const team = this.teams.get(teamId);
+    if (!team) return false;
+    if (team.createdBy === userId) return true;
+    return (this.teamMembers.get(teamId) ?? []).some(member => member.userId === userId);
+  }
+
+  private getMemoryTeamRole(teamId: string, userId: string): InviteRole | 'owner' | undefined {
+    const team = this.teams.get(teamId);
+    if (!team) return undefined;
+    if (team.createdBy === userId) return 'owner';
+    return (this.teamMembers.get(teamId) ?? []).find(member => member.userId === userId)?.role;
+  }
+
+  private getMemoryTeamMemberCount(teamId: string): number {
+    const team = this.teams.get(teamId);
+    if (!team) return 0;
+    const uniqueUsers = new Set<string>([team.createdBy]);
+    for (const member of this.teamMembers.get(teamId) ?? []) {
+      uniqueUsers.add(member.userId);
+    }
+    return uniqueUsers.size;
+  }
+
+  private listMemoryTeamMembers(teamId: string): TeamMemberSummary[] {
+    const team = this.teams.get(teamId);
+    if (!team) {
+      return [];
+    }
+
+    const membersByUserId = new Map<string, TeamMemberSummary>();
+    const owner = this.users.get(team.createdBy);
+    if (owner) {
+      membersByUserId.set(owner.id, {
+        userId: owner.id,
+        email: owner.email,
+        fullName: owner.fullName,
+        role: 'owner',
+        joinedAt: team.createdAt,
+      });
+    }
+
+    for (const member of this.teamMembers.get(teamId) ?? []) {
+      const user = this.users.get(member.userId);
+      if (!user) continue;
+      if (membersByUserId.has(user.id) && membersByUserId.get(user.id)?.role === 'owner') {
+        continue;
+      }
+      membersByUserId.set(user.id, {
+        userId: user.id,
+        email: user.email,
+        fullName: user.fullName,
+        role: member.role,
+        joinedAt: member.joinedAt,
+      });
+    }
+
+    return Array.from(membersByUserId.values());
+  }
+
+  private upsertMemoryTeamMember(teamId: string, userId: string, role: InviteRole | 'owner'): void {
+    const current = this.teamMembers.get(teamId) ?? [];
+    const existingIndex = current.findIndex(member => member.userId === userId);
+    const joinedAt = existingIndex >= 0 ? current[existingIndex].joinedAt : new Date().toISOString();
+
+    const nextMember: MemoryTeamMember = {
+      teamId,
+      userId,
+      role,
+      joinedAt,
+    };
+
+    if (existingIndex >= 0) {
+      current[existingIndex] = nextMember;
+    } else {
+      current.push(nextMember);
+    }
+
+    this.teamMembers.set(teamId, current);
   }
 }
