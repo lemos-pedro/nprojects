@@ -2,6 +2,7 @@ export type Message = {
   id: string;
   channelId: string;
   senderId: string;
+  senderName?: string;
   type: 'text' | 'file' | 'image' | 'system' | 'task_update' | 'meeting_summary';
   content: string;
   createdAt: string;

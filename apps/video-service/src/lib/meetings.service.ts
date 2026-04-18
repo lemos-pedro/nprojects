@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import axios from 'axios';
 import { randomUUID } from 'crypto';
 import {
@@ -353,31 +353,13 @@ export class MeetingsService {
     try {
       event = await this.webhookReceiver.receive(rawBody, authorization, false);
     } catch (error) {
-      this.logger.warn(
-        `LiveKit webhook signature validation failed, retrying without auth: ${
-          error instanceof Error ? error.message : 'unknown error'
-        }`,
+      throw new UnauthorizedException(
+        `invalid livekit webhook signature: ${error instanceof Error ? error.message : 'unknown error'}`,
       );
-
-      try {
-        event = await this.webhookReceiver.receive(rawBody, authorization, true);
-      } catch (fallbackError) {
-        this.logger.warn(
-          `LiveKit webhook SDK parsing failed, using raw JSON fallback: ${
-            fallbackError instanceof Error ? fallbackError.message : 'unknown error'
-          }`,
-        );
-        event = this.parseRawWebhookEvent(rawBody);
-      }
     }
 
     if (!event.event || !event.room?.name) {
-      this.logger.warn(
-        `Webhook SDK output incomplete, switching to raw JSON parse. event=${event.event ?? 'empty'} room=${
-          event.room?.name ?? 'empty'
-        }`,
-      );
-      event = this.parseRawWebhookEvent(rawBody);
+      throw new BadRequestException('invalid livekit webhook payload');
     }
 
     this.logger.log(
@@ -393,7 +375,7 @@ export class MeetingsService {
 
   async renderDemoPage(
     meetingId: string,
-    viewer: { userId: string; role: ParticipantRole; name: string },
+    viewer: { userId: string; role: ParticipantRole; name: string; accessToken?: string },
   ): Promise<string> {
     const meeting = await this.getMeeting(meetingId);
     return `<!doctype html>
@@ -433,6 +415,7 @@ export class MeetingsService {
     const meetingId = ${JSON.stringify(meetingId)};
     const viewer = ${JSON.stringify(viewer)};
     const livekitUrl = ${JSON.stringify(this.publicWsUrl)};
+    const accessToken = ${JSON.stringify(viewer.accessToken ?? null)};
     const statusEl = document.getElementById('status');
     const localEl = document.getElementById('local');
     const remoteEl = document.getElementById('remote');
@@ -616,9 +599,13 @@ export class MeetingsService {
         wireRoomEvents();
 
         setStatus('Fetching token...');
+        const headers = { 'Content-Type': 'application/json' };
+        if (accessToken) {
+          headers.Authorization = 'Bearer ' + accessToken;
+        }
         const tokenRes = await fetch('/api/v1/meetings/' + meetingId + '/token', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify(viewer)
         });
 
@@ -1111,35 +1098,5 @@ Participants are collaborating on a project review. Produce a concise executive 
       .replaceAll('>', '&gt;')
       .replaceAll('"', '&quot;')
       .replaceAll("'", '&#39;');
-  }
-
-  private parseRawWebhookEvent(rawBody: string): WebhookEvent {
-    const parsed = JSON.parse(rawBody) as Record<string, unknown>;
-    const room =
-      parsed.room && typeof parsed.room === 'object'
-        ? (parsed.room as Record<string, unknown>)
-        : undefined;
-    const participant =
-      parsed.participant && typeof parsed.participant === 'object'
-        ? (parsed.participant as Record<string, unknown>)
-        : undefined;
-
-    return {
-      event: typeof parsed.event === 'string' ? parsed.event : '',
-      room: room
-        ? ({
-            name: typeof room.name === 'string' ? room.name : '',
-            sid: typeof room.sid === 'string' ? room.sid : '',
-            metadata: typeof room.metadata === 'string' ? room.metadata : '',
-          } as WebhookEvent['room'])
-        : undefined,
-      participant: participant
-        ? ({
-            identity: typeof participant.identity === 'string' ? participant.identity : '',
-            sid: typeof participant.sid === 'string' ? participant.sid : '',
-            name: typeof participant.name === 'string' ? participant.name : '',
-          } as WebhookEvent['participant'])
-        : undefined,
-    } as WebhookEvent;
   }
 }

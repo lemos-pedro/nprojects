@@ -146,7 +146,7 @@ export class NotificationsService {
         createdAt: result.rows[0].created_at,
       };
 
-      (this.gateway as any).server?.emit(SocketEvent.Notification, notification);
+      this.gateway.emitToChannel(userId, SocketEvent.Notification, notification);
       Logger.debug(`notification emitted`, 'NotificationsService');
       return notification;
     }
@@ -163,7 +163,7 @@ export class NotificationsService {
     list.push(notif);
     this.notifications.set(userId, list);
     // broadcast to all clients
-    (this.gateway as any).server?.emit(SocketEvent.Notification, notif);
+    this.gateway.emitToChannel(userId, SocketEvent.Notification, notif);
     Logger.debug(`notification emitted`, 'NotificationsService');
     return notif;
   }

@@ -23,7 +23,7 @@ export class GoogleOAuthService {
 
   private readonly clientId = process.env.GOOGLE_CLIENT_ID ?? '';
   private readonly clientSecret = process.env.GOOGLE_CLIENT_SECRET ?? '';
-  private readonly callbackUrl = process.env.GOOGLE_CALLBACK_URL ?? '';
+  private readonly callbackUrl = process.env.GOOGLE_CALLBACK_URL ?? 'https://app.drucci.pt/api/v1/auth/google/callback';
 
   /**
    * Devolve a URL para redirecionar o utilizador para o Google.

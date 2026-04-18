@@ -3,6 +3,7 @@ import 'module-alias/register';
 
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import helmet from 'helmet';
 import { assertSecureEnv, createHttpObservabilityMiddleware, createRateLimitMiddleware } from '@ngola/shared';
 
 import { AppModule } from './app.module';
@@ -25,7 +26,15 @@ async function bootstrap(): Promise<void> {
   const host = process.env.API_GATEWAY_HOST ?? '0.0.0.0';
   const port = Number(process.env.API_GATEWAY_PORT ?? 3000);
 
-  app.enableCors();
+  app.use(helmet());
+  app.enableCors({
+    origin: ['https://app.drucci.pt', 'https://api.drucci.pt'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
+    exposedHeaders: ['Authorization'],
+    credentials: true,
+    maxAge: 86400,
+  });
   app.use(createHttpObservabilityMiddleware('api-gateway'));
   app.use(
     createRateLimitMiddleware('api-gateway', {

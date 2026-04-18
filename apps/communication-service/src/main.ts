@@ -3,16 +3,29 @@ import 'module-alias/register';
 
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { createHttpObservabilityMiddleware, createRateLimitMiddleware } from '@ngola/shared';
+import helmet from 'helmet';
+import {
+  assertSecureEnv,
+  createHttpObservabilityMiddleware,
+  createRateLimitMiddleware,
+} from '@ngola/shared';
 
 import { AppModule } from './app.module';
 
 async function bootstrap(): Promise<void> {
+  assertSecureEnv('communication-service', [
+    {
+      name: 'AUTH_JWT_ACCESS_SECRET',
+      minLength: 24,
+      disallowedValues: ['dev-access-secret', 'replace-access-secret'],
+    },
+  ]);
+
   const app = await NestFactory.create(AppModule);
   const host = process.env.COMM_SERVICE_HOST ?? '0.0.0.0';
   const port = Number(process.env.COMM_SERVICE_PORT ?? 3004);
 
-  app.enableCors();
+  app.use(helmet());
   app.use(createHttpObservabilityMiddleware('communication-service'));
   app.use(
     createRateLimitMiddleware('communication-service', {

@@ -70,46 +70,21 @@ interface MemoryTeamInvite {
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
   private readonly usePostgres = isPostgresEnabled();
-  private readonly users = new Map<string, AuthUser>();
-  private readonly sessions = new Map<string, AuthSession>();
   private readonly accessSecret = process.env.AUTH_JWT_ACCESS_SECRET ?? 'dev-access-secret';
   private readonly refreshSecret = process.env.AUTH_JWT_REFRESH_SECRET ?? 'dev-refresh-secret';
   private readonly accessTtl = Number(process.env.AUTH_ACCESS_TOKEN_TTL ?? 900);
   private readonly refreshTtl = Number(process.env.AUTH_REFRESH_TOKEN_TTL ?? 604800);
+  private readonly users = new Map<string, AuthUser>();
+  private readonly usersByEmail = new Map<string, string>();
+  private readonly sessions = new Map<string, AuthSession>();
   private readonly teamInvites = new Map<string, MemoryTeamInvite>();
-  private readonly memoryTeams = new Map<
-    string,
-    { id: string; tenantId: string; name: string; description?: string; createdBy: string }
-  >();
 
   async register(payload: RegisterPayload): Promise<{ user: SafeAuthUser; tokens: AuthTokens }> {
     if (!payload.email || !payload.password || !payload.fullName) {
       throw new BadRequestException('email, password and fullName are required');
     }
 
-    if (this.usePostgres) {
-      return this.registerWithPostgres(payload);
-    }
-
-    const email = payload.email.trim().toLowerCase();
-
-    if ([...this.users.values()].some(user => user.email === email)) {
-      throw new ConflictException('email already registered');
-    }
-
-    const user: AuthUser = {
-      id: randomUUID(),
-      tenantId: randomUUID(),
-      email,
-      fullName: payload.fullName.trim(),
-      passwordHash: await hash(payload.password, 12),
-      twoFactorEnabled: false,
-      createdAt: new Date().toISOString(),
-    };
-
-    this.users.set(user.id, user);
-    const tokens = await this.issueTokens(user.id);
-    return { user: this.sanitizeUser(user), tokens };
+    return this.usePostgres ? this.registerWithPostgres(payload) : this.registerInMemory(payload);
   }
 
   async login(payload: LoginPayload): Promise<{ user: SafeAuthUser; tokens: AuthTokens }> {
@@ -117,11 +92,7 @@ export class AuthService {
       throw new BadRequestException('email and password are required');
     }
 
-    const user = this.usePostgres
-      ? await this.findUserByEmail(payload.email)
-      : [...this.users.values()].find(
-          currentUser => currentUser.email === payload.email.trim().toLowerCase(),
-        );
+    const user = await this.findUserByEmail(payload.email);
 
     if (!user || !(await compare(payload.password, user.passwordHash))) {
       throw new UnauthorizedException('invalid credentials');
@@ -146,32 +117,32 @@ export class AuthService {
       throw new BadRequestException('refresh token is required');
     }
 
-    if (this.usePostgres) {
-      const result = await query<{ user_id: string; expires_at: string }>(
-        `SELECT user_id, expires_at
-         FROM user_sessions
-         WHERE refresh_token = $1 AND revoked_at IS NULL
-         LIMIT 1`,
-        [refreshToken],
-      );
-      const session = result.rows[0];
+    if (!this.usePostgres) {
+      const session = this.sessions.get(refreshToken);
 
-      if (!session || new Date(session.expires_at).getTime() < Date.now()) {
+      if (!session || session.expiresAt < Date.now()) {
         throw new UnauthorizedException('refresh token expired or invalid');
       }
 
-      await query('DELETE FROM user_sessions WHERE refresh_token = $1', [refreshToken]);
-      return this.issueTokens(session.user_id);
+      this.sessions.delete(refreshToken);
+      return this.issueTokens(session.userId);
     }
 
-    const session = this.sessions.get(refreshToken);
+    const result = await query<{ user_id: string; expires_at: string }>(
+      `SELECT user_id, expires_at
+       FROM user_sessions
+       WHERE refresh_token = $1 AND revoked_at IS NULL
+       LIMIT 1`,
+      [refreshToken],
+    );
+    const session = result.rows[0];
 
-    if (!session || session.expiresAt < Date.now()) {
+    if (!session || new Date(session.expires_at).getTime() < Date.now()) {
       throw new UnauthorizedException('refresh token expired or invalid');
     }
 
-    this.sessions.delete(refreshToken);
-    return this.issueTokens(session.userId);
+    await query('DELETE FROM user_sessions WHERE refresh_token = $1', [refreshToken]);
+    return this.issueTokens(session.user_id);
   }
 
   async logout(refreshToken: string): Promise<{ revoked: boolean }> {
@@ -179,38 +150,51 @@ export class AuthService {
       throw new BadRequestException('refresh token is required');
     }
 
-    if (this.usePostgres) {
-      const result = await query('DELETE FROM user_sessions WHERE refresh_token = $1', [refreshToken]);
-      return { revoked: Boolean(result.rowCount) };
+    if (!this.usePostgres) {
+      const revoked = this.sessions.delete(refreshToken);
+      return { revoked };
     }
 
-    return { revoked: this.sessions.delete(refreshToken) };
+    const result = await query('DELETE FROM user_sessions WHERE refresh_token = $1', [refreshToken]);
+    return { revoked: Boolean(result.rowCount) };
   }
 
   async getProfile(userId: string): Promise<SafeAuthUser> {
-    const user = this.usePostgres ? await this.findUserById(userId) : this.requireUser(userId);
+    const user = await this.findUserById(userId);
     return this.sanitizeUser(user);
   }
 
-  async getUsers(tenantId: string): Promise<SafeAuthUser[]> {
-    if (this.usePostgres) {
-      const result = await query<DatabaseUserRow>(
-        `SELECT id, tenant_id, email, full_name, password_hash, two_factor_enabled, two_factor_secret, metadata, created_at
-         FROM users
-         WHERE tenant_id = $1
-         ORDER BY created_at ASC`,
-        [tenantId],
-      );
-
-      return result.rows.map(row => this.sanitizeUser(this.mapDatabaseUser(row)));
+  async getUsersByTenant(tenantId: string): Promise<SafeAuthUser[]> {
+    if (!this.usePostgres) {
+      return Array.from(this.users.values())
+        .filter(user => user.tenantId === tenantId)
+        .map(user => this.sanitizeUser(user));
     }
 
-    return [...this.users.values()]
-      .filter(user => user.tenantId === tenantId)
-      .map(user => this.sanitizeUser(user));
+    const result = await query<DatabaseUserRow>(
+      `SELECT DISTINCT u.id, u.tenant_id, u.email, u.full_name, u.password_hash,
+              u.two_factor_enabled, u.two_factor_secret, u.metadata, u.created_at
+       FROM users u
+       WHERE u.tenant_id = $1
+       UNION
+       SELECT DISTINCT u.id, u.tenant_id, u.email, u.full_name, u.password_hash,
+              u.two_factor_enabled, u.two_factor_secret, u.metadata, u.created_at
+       FROM users u
+       INNER JOIN team_members tm ON tm.user_id = u.id
+       INNER JOIN teams t ON t.id = tm.team_id
+       WHERE t.tenant_id = $1
+       ORDER BY created_at ASC`,
+      [tenantId],
+    );
+
+    return result.rows.map(row => this.sanitizeUser(this.mapDatabaseUser(row)));
   }
 
   async createTeamInviteLink(currentUser: SafeAuthUser, payload: TeamInvitePayload) {
+    if (!this.usePostgres) {
+      return this.createTeamInviteLinkInMemory(currentUser, payload);
+    }
+
     const role = this.normalizeInviteRole(payload.role);
     const requestedTeamName = payload.teamName?.trim();
     const expiresInDays = this.normalizeExpiresInDays(payload.expiresInDays);
@@ -228,104 +212,49 @@ export class AuthService {
     );
     const inviteUrl = `${joinBase}?inviteToken=${token}`;
 
-    if (this.usePostgres) {
-      const team = await withTransaction(async (client: PoolClient) => {
-        let teamId = payload.teamId;
-        let teamName = requestedTeamName ?? '';
+    const team = await withTransaction(async (client: PoolClient) => {
+      let teamId = payload.teamId;
+      let teamName = requestedTeamName ?? '';
 
-        if (teamId) {
-          const teamResult = await client.query<{ id: string; name: string }>(
-            `SELECT id, name
-             FROM teams
-             WHERE id = $1 AND tenant_id = $2
-             LIMIT 1`,
-            [teamId, currentUser.tenantId],
-          );
-
-          if (!teamResult.rows[0]) {
-            throw new NotFoundException('team not found in this tenant');
-          }
-
-          teamName = teamResult.rows[0].name;
-        } else {
-          const createdTeam = await client.query<{ id: string; name: string }>(
-            `INSERT INTO teams (tenant_id, name, description, created_by)
-             VALUES ($1, $2, $3, $4)
-             RETURNING id, name`,
-            [currentUser.tenantId, requestedTeamName, payload.description ?? null, currentUser.id],
-          );
-          teamId = createdTeam.rows[0].id;
-          teamName = createdTeam.rows[0].name;
-        }
-
-        await client.query(
-          `INSERT INTO invitations (tenant_id, invited_by, email, role, team_id, token, expires_at)
-           VALUES ($1, $2, $3, $4::member_role, $5, $6, $7)`,
-          [currentUser.tenantId, currentUser.id, email ?? `pending+${token.slice(0, 8)}@invite.local`, role, teamId, token, expiresAt.toISOString()],
+      if (teamId) {
+        const teamResult = await client.query<{ id: string; name: string }>(
+          `SELECT id, name
+           FROM teams
+           WHERE id = $1 AND tenant_id = $2
+           LIMIT 1`,
+          [teamId, currentUser.tenantId],
         );
 
-        return { id: teamId, name: teamName };
-      });
+        if (!teamResult.rows[0]) {
+          throw new NotFoundException('team not found in this tenant');
+        }
 
-      const response = {
-        token,
-        inviteUrl,
-        teamId: team.id,
-        teamName: team.name,
-        role,
-        email: email ?? null,
-        expiresAt: expiresAt.toISOString(),
-      };
-
-      await this.sendTeamInviteEmailIfConfigured({
-        email,
-        inviteUrl,
-        teamName: team.name,
-        role,
-        expiresAt: expiresAt.toISOString(),
-      });
-
-      return response;
-    }
-
-    let teamId = payload.teamId;
-    let teamName = requestedTeamName ?? '';
-
-    if (teamId) {
-      const existingTeam = this.memoryTeams.get(teamId);
-      if (!existingTeam || existingTeam.tenantId !== currentUser.tenantId) {
-        throw new NotFoundException('team not found in this tenant');
+        teamName = teamResult.rows[0].name;
+      } else {
+        const createdTeam = await client.query<{ id: string; name: string }>(
+          `INSERT INTO teams (tenant_id, name, description, created_by)
+           VALUES ($1, $2, $3, $4)
+           RETURNING id, name`,
+          [currentUser.tenantId, requestedTeamName, payload.description ?? null, currentUser.id],
+        );
+        teamId = createdTeam.rows[0].id;
+        teamName = createdTeam.rows[0].name;
       }
-      teamName = existingTeam.name;
-    } else {
-      teamId = randomUUID();
-      this.memoryTeams.set(teamId, {
-        id: teamId,
-        tenantId: currentUser.tenantId,
-        name: requestedTeamName!,
-        description: payload.description,
-        createdBy: currentUser.id,
-      });
-      teamName = requestedTeamName!;
-    }
 
-    this.teamInvites.set(token, {
-      token,
-      tenantId: currentUser.tenantId,
-      invitedBy: currentUser.id,
-      teamId,
-      teamName,
-      email,
-      role,
-      expiresAt: expiresAt.toISOString(),
-      status: 'pending',
+      await client.query(
+        `INSERT INTO invitations (tenant_id, invited_by, email, role, team_id, token, expires_at)
+         VALUES ($1, $2, $3, $4::member_role, $5, $6, $7)`,
+        [currentUser.tenantId, currentUser.id, email ?? `pending+${token.slice(0, 8)}@invite.local`, role, teamId, token, expiresAt.toISOString()],
+      );
+
+      return { id: teamId, name: teamName };
     });
 
     const response = {
       token,
       inviteUrl,
-      teamId,
-      teamName,
+      teamId: team.id,
+      teamName: team.name,
       role,
       email: email ?? null,
       expiresAt: expiresAt.toISOString(),
@@ -334,7 +263,7 @@ export class AuthService {
     await this.sendTeamInviteEmailIfConfigured({
       email,
       inviteUrl,
-      teamName,
+      teamName: team.name,
       role,
       expiresAt: expiresAt.toISOString(),
     });
@@ -347,90 +276,36 @@ export class AuthService {
       throw new BadRequestException('invite token is required');
     }
 
-    if (this.usePostgres) {
-      return this.joinTeamByInviteTokenPostgres(token.trim(), payload);
-    }
-
-    const invite = this.teamInvites.get(token.trim());
-    if (!invite || invite.status !== 'pending') {
-      throw new NotFoundException('invite not found or already used');
-    }
-
-    if (new Date(invite.expiresAt).getTime() < Date.now()) {
-      invite.status = 'expired';
-      throw new BadRequestException('invite expired');
-    }
-
-    const payloadEmail = payload.email?.trim().toLowerCase();
-    const inviteEmail = invite.email?.trim().toLowerCase();
-
-    if (inviteEmail && payloadEmail && inviteEmail !== payloadEmail) {
-      throw new BadRequestException('email does not match invite');
-    }
-
-    const email = payloadEmail ?? inviteEmail;
-    if (!email) {
-      throw new BadRequestException('email is required');
-    }
-
-    let user = [...this.users.values()].find(existing => existing.email === email);
-
-    if (!user) {
-      if (!payload.fullName?.trim()) {
-        throw new BadRequestException('fullName is required for new user');
-      }
-      if (!payload.password) {
-        throw new BadRequestException('password is required for new user');
-      }
-
-      user = {
-        id: randomUUID(),
-        tenantId: invite.tenantId,
-        email,
-        fullName: payload.fullName.trim(),
-        passwordHash: await hash(payload.password, 12),
-        twoFactorEnabled: false,
-        createdAt: new Date().toISOString(),
-      };
-      this.users.set(user.id, user);
-    } else if (user.tenantId !== invite.tenantId) {
-      throw new BadRequestException('user belongs to another tenant');
-    }
-
-    invite.status = 'accepted';
-    invite.acceptedAt = new Date().toISOString();
-
-    return {
-      joined: true,
-      teamId: invite.teamId,
-      teamName: invite.teamName,
-      userId: user.id,
-      email: user.email,
-      tenantId: user.tenantId,
-      role: invite.role,
-    };
+    return this.usePostgres
+      ? this.joinTeamByInviteTokenPostgres(token.trim(), payload)
+      : this.joinTeamByInviteTokenInMemory(token.trim(), payload);
   }
 
   async getUserFromAccessToken(accessToken: string): Promise<SafeAuthUser> {
     const payload = this.verifyAccessToken(accessToken);
-    const user = this.usePostgres ? await this.findUserById(payload.sub) : this.requireUser(payload.sub);
+    const user = await this.findUserById(payload.sub);
     return this.sanitizeUser(user);
   }
 
   async enableTwoFactor(userId: string): Promise<{ secret: string; otpauthUrl: string }> {
-    const user = this.usePostgres ? await this.findUserById(userId) : this.requireUser(userId);
+    const user = await this.findUserById(userId);
     const secret = generateTotpSecret();
 
-    if (this.usePostgres) {
-      await query(
-        `UPDATE users
-         SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('pendingTwoFactorSecret', $2)
-         WHERE id = $1`,
-        [userId, secret],
-      );
-    } else {
+    if (!this.usePostgres) {
       user.pendingTwoFactorSecret = secret;
+      this.saveMemoryUser(user);
+      return {
+        secret,
+        otpauthUrl: buildOtpAuthUrl(user.email, secret),
+      };
     }
+
+    await query(
+      `UPDATE users
+       SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('pendingTwoFactorSecret', $2)
+       WHERE id = $1`,
+      [userId, secret],
+    );
 
     return {
       secret,
@@ -446,27 +321,32 @@ export class AuthService {
       throw new BadRequestException('2fa code is required');
     }
 
-    const user = this.usePostgres ? await this.findUserById(userId) : this.requireUser(userId);
+    const user = await this.findUserById(userId);
     const secretToVerify = user.pendingTwoFactorSecret ?? user.twoFactorSecret;
 
     if (!secretToVerify || !verifyTotpCode(secretToVerify, code)) {
       throw new UnauthorizedException('invalid two-factor code');
     }
 
-    if (this.usePostgres) {
-      await query(
-        `UPDATE users
-         SET two_factor_enabled = TRUE,
-             two_factor_secret = $2,
-             metadata = COALESCE(metadata, '{}'::jsonb) - 'pendingTwoFactorSecret'
-         WHERE id = $1`,
-        [userId, secretToVerify],
-      );
-    } else {
+    if (!this.usePostgres) {
       user.twoFactorEnabled = true;
       user.twoFactorSecret = secretToVerify;
-      user.pendingTwoFactorSecret = undefined;
+      delete user.pendingTwoFactorSecret;
+      this.saveMemoryUser(user);
+      return {
+        verified: true,
+        twoFactorEnabled: true,
+      };
     }
+
+    await query(
+      `UPDATE users
+       SET two_factor_enabled = TRUE,
+           two_factor_secret = $2,
+           metadata = COALESCE(metadata, '{}'::jsonb) - 'pendingTwoFactorSecret'
+       WHERE id = $1`,
+      [userId, secretToVerify],
+    );
 
     return {
       verified: true,
@@ -474,15 +354,35 @@ export class AuthService {
     };
   }
 
-    async loginWithGoogle(googleEmail: string, googleName: string): Promise<{ user: SafeAuthUser; tokens: AuthTokens }> {
-  const email = googleEmail.trim().toLowerCase();
+  async loginWithGoogle(
+    googleEmail: string,
+    googleName: string,
+  ): Promise<{ user: SafeAuthUser; tokens: AuthTokens }> {
+    const email = googleEmail.trim().toLowerCase();
 
-  if (this.usePostgres) {
-    // Tentar encontrar user existente
+    if (!this.usePostgres) {
+      let user = await this.findUserByEmail(email);
+
+      if (!user) {
+        user = {
+          id: randomUUID(),
+          tenantId: randomUUID(),
+          email,
+          fullName: googleName.trim(),
+          passwordHash: '',
+          twoFactorEnabled: false,
+          createdAt: new Date().toISOString(),
+        };
+        this.saveMemoryUser(user);
+      }
+
+      const tokens = await this.issueTokens(user.id);
+      return { user: this.sanitizeUser(user), tokens };
+    }
+
     let user = await this.findUserByEmail(email);
 
     if (!user) {
-      // Primeiro login com Google — criar tenant + user automaticamente
       const tenantName = `${googleName.trim()} Workspace`;
       const tenantSlug = `${this.slugify(tenantName)}-${randomUUID().slice(0, 8)}`;
 
@@ -494,7 +394,6 @@ export class AuthService {
           [tenantName, tenantSlug],
         );
 
-        // password_hash vazio — user Google nunca usa password
         const userResult = await client.query<DatabaseUserRow>(
           `INSERT INTO users (tenant_id, email, password_hash, full_name, two_factor_enabled, metadata)
            VALUES ($1, $2, '', $3, FALSE, '{"provider": "google"}'::jsonb)
@@ -512,32 +411,10 @@ export class AuthService {
     return { user: this.sanitizeUser(user), tokens };
   }
 
-  // Fallback memória (dev sem postgres)
-  let user = [...this.users.values()].find(u => u.email === email);
-
-  if (!user) {
-    user = {
-      id: randomUUID(),
-      tenantId: randomUUID(),
-      email,
-      fullName: googleName.trim(),
-      passwordHash: '',
-      twoFactorEnabled: false,
-      createdAt: new Date().toISOString(),
-    };
-    this.users.set(user.id, user);
-  }
-
-  const tokens = await this.issueTokens(user.id);
-  return { user: this.sanitizeUser(user), tokens };
-}
-
   health(): Record<string, unknown> {
     return {
       service: 'auth-service',
       status: 'ok',
-      users: this.users.size,
-      sessions: this.sessions.size,
       persistence: this.usePostgres ? 'postgres' : 'memory',
     };
   }
@@ -572,7 +449,8 @@ export class AuthService {
       return this.mapDatabaseUser(userResult.rows[0]);
     });
 
-    return this.sanitizeUser(user);
+    const tokens = await this.issueTokens(user.id);
+    return { user: this.sanitizeUser(user), tokens };
   }
 
   private async issueTokens(userId: string): Promise<AuthTokens> {
@@ -665,17 +543,17 @@ export class AuthService {
     return safeUser;
   }
 
-  private requireUser(userId: string): AuthUser {
-    const user = this.users.get(userId);
 
-    if (!user) {
-      throw new UnauthorizedException('user not found');
-    }
-
-    return user;
-  }
 
   private async findUserById(userId: string): Promise<AuthUser> {
+    if (!this.usePostgres) {
+      const user = this.users.get(userId);
+      if (!user) {
+        throw new UnauthorizedException('user not found');
+      }
+      return user;
+    }
+
     const result = await query<DatabaseUserRow>(
       `SELECT id, tenant_id, email, full_name, password_hash, two_factor_enabled, two_factor_secret, metadata, created_at
        FROM users
@@ -692,6 +570,11 @@ export class AuthService {
   }
 
   private async findUserByEmail(email: string): Promise<AuthUser | undefined> {
+    if (!this.usePostgres) {
+      const userId = this.usersByEmail.get(email.trim().toLowerCase());
+      return userId ? this.users.get(userId) : undefined;
+    }
+
     const result = await query<DatabaseUserRow>(
       `SELECT id, tenant_id, email, full_name, password_hash, two_factor_enabled, two_factor_secret, metadata, created_at
        FROM users
@@ -732,6 +615,125 @@ export class AuthService {
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '');
+  }
+
+  private async registerInMemory(
+    payload: RegisterPayload,
+  ): Promise<{ user: SafeAuthUser; tokens: AuthTokens }> {
+    const email = payload.email.trim().toLowerCase();
+    if (this.usersByEmail.has(email)) {
+      throw new ConflictException('email already registered');
+    }
+
+    const user: AuthUser = {
+      id: randomUUID(),
+      tenantId: randomUUID(),
+      email,
+      fullName: payload.fullName.trim(),
+      passwordHash: await hash(payload.password, 12),
+      twoFactorEnabled: false,
+      createdAt: new Date().toISOString(),
+    };
+
+    this.saveMemoryUser(user);
+
+    const tokens = await this.issueTokens(user.id);
+    return { user: this.sanitizeUser(user), tokens };
+  }
+
+  private createTeamInviteLinkInMemory(currentUser: SafeAuthUser, payload: TeamInvitePayload) {
+    const role = this.normalizeInviteRole(payload.role);
+    const expiresInDays = this.normalizeExpiresInDays(payload.expiresInDays);
+    const expiresAt = new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString();
+    const token = this.generateInviteToken();
+    const email = payload.email?.trim().toLowerCase();
+    const teamId = payload.teamId ?? randomUUID();
+    const teamName = payload.teamName?.trim() || `Team ${teamId.slice(0, 8)}`;
+    const joinBase = (process.env.TEAM_JOIN_BASE_URL ?? 'http://localhost:8080/register').replace(
+      /\/+$/,
+      '',
+    );
+    const inviteUrl = `${joinBase}?inviteToken=${token}`;
+
+    this.teamInvites.set(token, {
+      token,
+      tenantId: currentUser.tenantId,
+      invitedBy: currentUser.id,
+      teamId,
+      teamName,
+      email,
+      role,
+      expiresAt,
+      status: 'pending',
+    });
+
+    return {
+      token,
+      inviteUrl,
+      teamId,
+      teamName,
+      role,
+      email: email ?? null,
+      expiresAt,
+    };
+  }
+
+  private async joinTeamByInviteTokenInMemory(token: string, payload: JoinTeamByInvitePayload) {
+    const invite = this.teamInvites.get(token);
+    if (!invite || invite.status !== 'pending') {
+      throw new NotFoundException('invite not found or no longer active');
+    }
+
+    if (new Date(invite.expiresAt).getTime() < Date.now()) {
+      invite.status = 'expired';
+      throw new UnauthorizedException('invite expired');
+    }
+
+    const email = payload.email?.trim().toLowerCase() ?? invite.email;
+    const fullName = payload.fullName?.trim();
+
+    if (!email || !fullName) {
+      throw new BadRequestException('email and fullName are required');
+    }
+
+    let user = await this.findUserByEmail(email);
+    if (!user) {
+      if (!payload.password) {
+        throw new BadRequestException('password is required for new users');
+      }
+
+      user = {
+        id: randomUUID(),
+        tenantId: invite.tenantId,
+        email,
+        fullName,
+        passwordHash: await hash(payload.password, 12),
+        twoFactorEnabled: false,
+        createdAt: new Date().toISOString(),
+      };
+    } else {
+      user.tenantId = invite.tenantId;
+      user.fullName = fullName;
+    }
+
+    this.saveMemoryUser(user);
+    invite.status = 'accepted';
+    invite.acceptedAt = new Date().toISOString();
+
+    const tokens = await this.issueTokens(user.id);
+    return {
+      accepted: true,
+      teamId: invite.teamId,
+      teamName: invite.teamName,
+      role: invite.role,
+      user: this.sanitizeUser(user),
+      tokens,
+    };
+  }
+
+  private saveMemoryUser(user: AuthUser): void {
+    this.users.set(user.id, user);
+    this.usersByEmail.set(user.email.trim().toLowerCase(), user.id);
   }
 
   private normalizeInviteRole(role?: string): InviteRole {
@@ -906,9 +908,7 @@ export class AuthService {
       );
 
       if (existingUser.rows[0]) {
-        if (existingUser.rows[0].tenant_id !== invite.tenant_id) {
-          throw new BadRequestException('user belongs to another tenant');
-        }
+        // User exists in any tenant — add to team directly via team_members
         userId = existingUser.rows[0].id;
       } else {
         if (!payload.fullName?.trim()) {

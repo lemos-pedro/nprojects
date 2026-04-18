@@ -30,13 +30,21 @@ export class GatewayService {
     authorization?: string,
     params?: Record<string, string | undefined>,
   ): Promise<T> {
+    const internalToken = process.env.INTERNAL_SERVICE_TOKEN ?? '';
+    const headers: Record<string, string> = {
+      'x-internal-service-token': internalToken,
+    };
+    if (authorization) {
+      headers['authorization'] = authorization;
+    }
+
     try {
       const response = await axios.request<T>({
         method,
         url: `${baseUrl}${path}`,
         data: body ?? {},
         params,
-        headers: authorization ? { authorization } : undefined,
+        headers,
       });
       return response.data;
     } catch (error) {

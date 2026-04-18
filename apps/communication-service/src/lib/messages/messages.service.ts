@@ -4,6 +4,8 @@ import { randomUUID } from 'crypto';
 import { query, isPostgresEnabled } from '@ngola/database';
 
 import { CreateMessageDto, EditMessageDto, Message, ReactionDto } from './messages.types';
+import { SocketGateway } from '../socket/socket.gateway';
+import { SocketEvent } from '../socket/socket.types';
 
 type MessageRow = {
   id: string;
@@ -17,12 +19,15 @@ type MessageRow = {
   edited_at: string | null;
   created_at: string;
   deleted_at: string | null;
+  sender_name: string | null;
 };
 
 @Injectable()
 export class MessagesService {
   private readonly usePostgres = isPostgresEnabled();
   private readonly messages = new Map<string, Message[]>();
+
+  constructor(private readonly socketGateway: SocketGateway) {}
 
   async create(payload: CreateMessageDto): Promise<Message> {
     if (!payload.channelId || !payload.senderId || !payload.content?.trim()) {
@@ -66,7 +71,9 @@ export class MessagesService {
         [payload.channelId],
       );
 
-      return this.getById(result.rows[0].id);
+      const message = await this.getById(result.rows[0].id);
+      this.socketGateway.emitToChannel(payload.channelId, SocketEvent.Message, message);
+      return message;
     }
 
     const message: Message = {
@@ -89,10 +96,12 @@ export class MessagesService {
   async listByChannel(channelId: string): Promise<Message[]> {
     if (this.usePostgres) {
       const result = await query<MessageRow>(
-        `SELECT id, channel_id, user_id, parent_id, type, content, metadata, is_pinned, edited_at, created_at, deleted_at
-         FROM messages
-         WHERE channel_id = $1
-         ORDER BY created_at ASC`,
+        `SELECT m.id, m.channel_id, m.user_id, m.parent_id, m.type, m.content, m.metadata,
+                m.is_pinned, m.edited_at, m.created_at, m.deleted_at, u.full_name as sender_name
+         FROM messages m
+         LEFT JOIN users u ON u.id = m.user_id
+         WHERE m.channel_id = $1
+         ORDER BY m.created_at ASC`,
         [channelId],
       );
 
@@ -195,9 +204,11 @@ export class MessagesService {
 
   private async getById(messageId: string): Promise<Message> {
     const result = await query<MessageRow>(
-      `SELECT id, channel_id, user_id, parent_id, type, content, metadata, is_pinned, edited_at, created_at, deleted_at
-       FROM messages
-       WHERE id = $1
+      `SELECT m.id, m.channel_id, m.user_id, m.parent_id, m.type, m.content, m.metadata,
+              m.is_pinned, m.edited_at, m.created_at, m.deleted_at, u.full_name as sender_name
+       FROM messages m
+       LEFT JOIN users u ON u.id = m.user_id
+       WHERE m.id = $1
        LIMIT 1`,
       [messageId],
     );
@@ -230,6 +241,7 @@ export class MessagesService {
       id: row.id,
       channelId: row.channel_id,
       senderId: row.user_id,
+      senderName: row.sender_name ?? undefined,
       type: row.type,
       content: row.content ?? '',
       createdAt: row.created_at,

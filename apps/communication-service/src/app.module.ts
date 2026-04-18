@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 
+import { CommunicationAuthGuard } from './communication-auth.guard';
 import { ChannelsController } from './lib/channels/channels.controller';
 import { ChannelsService } from './lib/channels/channels.service';
 import { MessagesController } from './lib/messages/messages.controller';
@@ -11,6 +13,15 @@ import { HealthController } from './health.controller';
 
 @Module({
   controllers: [HealthController, ChannelsController, MessagesController, NotificationsController],
-  providers: [ChannelsService, MessagesService, NotificationsService, SocketGateway],
+  providers: [
+    ChannelsService,
+    MessagesService,
+    NotificationsService,
+    SocketGateway,
+    {
+      provide: APP_GUARD,
+      useClass: CommunicationAuthGuard,
+    },
+  ],
 })
 export class AppModule {}

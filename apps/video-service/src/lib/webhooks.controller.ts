@@ -18,7 +18,7 @@ export class WebhooksController {
     this.logger.log(
       `LiveKit webhook request received: auth=${authorization ?? authorize ? 'present' : 'missing'} bytes=${
         rawBody.length
-      } snippet=${rawBody.slice(0, 220)}`,
+      }`,
     );
     return this.meetings.handleWebhook(rawBody, authorization ?? authorize);
   }

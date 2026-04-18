@@ -17,7 +17,7 @@ export class UserController {
   @UseGuards(AuthGuard)
   @Get('users')
   getUsers(@CurrentUser() user: SafeAuthUser) {
-    return this.authService.getUsers(user.tenantId);
+    return this.authService.getUsersByTenant(user.tenantId);
   }
 
   @UseGuards(AuthGuard)

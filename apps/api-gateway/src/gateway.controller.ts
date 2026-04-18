@@ -55,8 +55,10 @@ export class GatewayController {
 
   @Get('auth/google')
   async googleLogin(@Res() res: Response) {
-    const authServiceUrl = process.env.AUTH_SERVICE_URL ?? 'http://auth-service:3001';
-    return res.redirect(`${authServiceUrl}/api/v1/auth/google`);
+    // 1. Pede a URL correta ao auth-service num request interno
+    const response = await this.gatewayService.forwardAuthRequest<{url: string}>('get', '/auth/google');
+    // 2. Faz redirect seguro diretamente ao portal da Google
+    return res.redirect(response.url);
   }
 
   @Get('auth/google/callback')
@@ -66,12 +68,31 @@ export class GatewayController {
     @Query('state') state: string,
     @Res() res: Response,
   ) {
-    const authServiceUrl = process.env.AUTH_SERVICE_URL ?? 'http://auth-service:3001';
     const params = new URLSearchParams();
     if (code) params.set('code', code);
     if (error) params.set('error', error);
     if (state) params.set('state', state);
-    return res.redirect(`${authServiceUrl}/api/v1/auth/google/callback?${params.toString()}`);
+    
+    const targetPath = `/auth/google/callback?${params.toString()}`;
+    const frontendRedirect = process.env.FRONTEND_REDIRECT_URL ?? 'https://app.drucci.pt/auth/callback';
+    
+    try {
+      // 1. Passa o código Google ao auth-service
+      const data = await this.gatewayService.forwardAuthRequest<{user: any, tokens: any}>('get', targetPath);
+      
+      const successParams = new URLSearchParams({
+        accessToken: data.tokens.accessToken,
+        refreshToken: data.tokens.refreshToken,
+        expiresIn: String(data.tokens.expiresIn),
+        userId: data.user.id,
+        tenantId: data.user.tenantId,
+      });
+
+      // 2. Redireciona o cliente pro Frontend final com sucesso
+      return res.redirect(`${frontendRedirect}?${successParams.toString()}`);
+    } catch {
+      return res.redirect(`${frontendRedirect}?error=google_auth_failed`);
+    }
   }
 
   @Get('me')

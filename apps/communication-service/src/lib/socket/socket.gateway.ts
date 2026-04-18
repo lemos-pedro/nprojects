@@ -11,22 +11,44 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 
+import { extractBearerToken, verifyAccessToken } from '@ngola/shared';
+
 import { SocketEvent } from './socket.types';
 
 @WebSocketGateway({ cors: true })
 export class SocketGateway implements OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit {
   @WebSocketServer() private server!: Server;
+  private readonly logger = new Logger(SocketGateway.name);
+  private readonly accessSecret = process.env.AUTH_JWT_ACCESS_SECRET ?? 'dev-access-secret';
 
   afterInit() {
-    Logger.log('socket gateway ready', 'SocketGateway');
+    this.logger.log('socket gateway ready');
   }
 
   handleConnection(client: Socket) {
-    Logger.log(`client connected ${client.id}`, 'SocketGateway');
+    try {
+      const token = this.extractSocketToken(client);
+      if (!token) {
+        throw new Error('missing bearer token');
+      }
+
+      const payload = verifyAccessToken(token, this.accessSecret);
+      client.data.userId = payload.sub;
+      this.logger.log(`client connected ${client.id}`);
+    } catch (error) {
+      this.logger.warn(
+        `socket auth rejected for ${client.id}: ${error instanceof Error ? error.message : 'unknown error'}`,
+      );
+      client.disconnect(true);
+    }
   }
 
   handleDisconnect(client: Socket) {
-    Logger.log(`client disconnected ${client.id}`, 'SocketGateway');
+    this.logger.log(`client disconnected ${client.id}`);
+  }
+
+  emitToChannel(channelId: string, event: string, payload: unknown) {
+    this.server.to(channelId).emit(event, payload);
   }
 
   @SubscribeMessage(SocketEvent.Message)
@@ -101,5 +123,41 @@ export class SocketGateway implements OnGatewayConnection, OnGatewayDisconnect, 
     const eventPayload = { ...payload, at: payload.at ?? new Date().toISOString() };
     client.broadcast.emit(SocketEvent.MeetingMuteAll, eventPayload);
     return { ack: true };
+  }
+
+  private extractSocketToken(client: Socket): string | undefined {
+    const handshakeAuth = client.handshake.auth as
+      | { token?: unknown; authorization?: unknown }
+      | undefined;
+
+    if (typeof handshakeAuth?.token === 'string') {
+      return this.normalizeSocketToken(handshakeAuth.token);
+    }
+
+    if (typeof handshakeAuth?.authorization === 'string') {
+      return extractBearerToken(handshakeAuth.authorization);
+    }
+
+    const headerAuthorization = client.handshake.headers.authorization;
+    if (typeof headerAuthorization === 'string') {
+      return extractBearerToken(headerAuthorization);
+    }
+
+    const queryToken = client.handshake.query.token;
+    if (typeof queryToken === 'string') {
+      return this.normalizeSocketToken(queryToken);
+    }
+
+    return undefined;
+  }
+
+  private normalizeSocketToken(value: string): string | undefined {
+    const bearerToken = extractBearerToken(value);
+    if (bearerToken) {
+      return bearerToken;
+    }
+
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
   }
 }

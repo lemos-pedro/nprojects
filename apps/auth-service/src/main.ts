@@ -3,6 +3,7 @@ import 'module-alias/register';
 
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import helmet from 'helmet';
 import { assertSecureEnv, createHttpObservabilityMiddleware, createRateLimitMiddleware } from '@ngola/shared';
 
 import { AppModule } from './app.module';
@@ -30,7 +31,7 @@ async function bootstrap(): Promise<void> {
   const host = process.env.AUTH_SERVICE_HOST ?? '0.0.0.0';
   const port = Number(process.env.AUTH_SERVICE_PORT ?? 3001);
 
-  app.enableCors();
+  app.use(helmet());
   app.use(createHttpObservabilityMiddleware('auth-service'));
   app.use(
     createRateLimitMiddleware('auth-service', {

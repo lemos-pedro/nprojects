@@ -4,12 +4,18 @@ import 'module-alias/register';
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { NextFunction, Request, Response } from 'express';
+import helmet from 'helmet';
 import { assertSecureEnv, createHttpObservabilityMiddleware, createRateLimitMiddleware } from '@ngola/shared';
 
 import { AppModule } from './app.module';
 
 async function bootstrap(): Promise<void> {
   assertSecureEnv('video-service', [
+    {
+      name: 'AUTH_JWT_ACCESS_SECRET',
+      minLength: 24,
+      disallowedValues: ['dev-access-secret', 'replace-access-secret'],
+    },
     {
       name: 'INTERNAL_SERVICE_TOKEN',
       minLength: 24,
@@ -27,36 +33,7 @@ async function bootstrap(): Promise<void> {
   const host = process.env.VIDEO_SERVICE_HOST ?? '0.0.0.0';
   const port = Number(process.env.VIDEO_SERVICE_PORT ?? 3005);
 
-  // ==================== CORS ====================
-  app.enableCors({
-    origin: 'http://localhost:8080', // Frontend
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: [
-      'Content-Type',
-      'Authorization',
-      'X-Requested-With',
-      'Accept',
-      'Origin',
-    ],
-    exposedHeaders: ['Authorization'],
-    preflightContinue: false,
-    optionsSuccessStatus: 204,
-    maxAge: 86400,
-  });
-
-  // ==================== HANDLE PRE-FLIGHT OPTIONS ====================
-  // Garante que qualquer preflight OPTIONS não seja bloqueado
-  app.use((req: Request, res: Response, next: NextFunction) => {
-    if (req.method === 'OPTIONS') {
-      res.header('Access-Control-Allow-Origin', 'http://localhost:8080');
-      res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-      res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Accept,Origin');
-      res.header('Access-Control-Allow-Credentials', 'true');
-      return res.sendStatus(204);
-    }
-    next();
-  });
+  app.use(helmet());
 
   // ==================== GLOBAL PREFIX ====================
   app.setGlobalPrefix('api/v1');

@@ -65,11 +65,13 @@ export class MeetingsController {
     @Query('userId') userId?: string,
     @Query('role') role?: ParticipantRole,
     @Query('name') name?: string,
+    @Query('accessToken') accessToken?: string,
   ) {
     return this.meetingsService.renderDemoPage(id, {
       userId: userId ?? `demo-${Date.now()}`,
       role: role ?? ParticipantRole.Viewer,
       name: name ?? 'Demo User',
+      accessToken,
     });
   }
 }

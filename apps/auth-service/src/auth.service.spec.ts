@@ -80,17 +80,17 @@ describe('AuthService', () => {
   });
 
   it('enables and verifies two-factor authentication', async () => {
-    const user = await service.register({
+    const registration = await service.register({
       email: 'admin@ngola.dev',
       password: 'super-secret',
       fullName: 'Ngola Admin',
     });
 
-    const setup = await service.enableTwoFactor(user.id);
+    const setup = await service.enableTwoFactor(registration.user.id);
     expect(setup.otpauthUrl).toContain('otpauth://totp/');
     const validCode = generateTotpCode(setup.secret);
 
-    await expect(service.verifyTwoFactor(user.id, validCode)).resolves.toMatchObject({
+    await expect(service.verifyTwoFactor(registration.user.id, validCode)).resolves.toMatchObject({
       verified: true,
       twoFactorEnabled: true,
     });

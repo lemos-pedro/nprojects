@@ -1,6 +1,5 @@
-import { Body, Controller, Get, HttpCode, Post, Query, Res, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, HttpCode, Post, Query, UnauthorizedException, UseGuards } from '@nestjs/common';
 import { randomUUID } from 'crypto';
-import { Response } from 'express';
 
 import { AuthGuard } from './auth.guard';
 import { CurrentUser } from './current-user.decorator';
@@ -56,23 +55,19 @@ export class AuthController {
   }
 
   @Get('google')
-  async googleLogin(@Res() res: Response) {
+  googleLogin() {
     const state = randomUUID();
     const url = this.googleOAuth.buildAuthUrl(state);
-    return res.redirect(url);
+    return { url };
   }
 
   @Get('google/callback')
   async googleCallback(
     @Query('code') code: string,
     @Query('error') error: string,
-    @Res() res: Response,
   ) {
-    const frontendRedirect =
-      process.env.FRONTEND_REDIRECT_URL ?? 'http://localhost:5173/auth/callback';
-
     if (error || !code) {
-      return res.redirect(`${frontendRedirect}?error=google_auth_cancelled`);
+      throw new BadRequestException('google_auth_cancelled');
     }
 
     try {
@@ -82,17 +77,9 @@ export class AuthController {
         googleUser.name,
       );
 
-      const params = new URLSearchParams({
-        accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken,
-        expiresIn: String(tokens.expiresIn),
-        userId: user.id,
-        tenantId: user.tenantId,
-      });
-
-      return res.redirect(`${frontendRedirect}?${params.toString()}`);
+      return { user, tokens };
     } catch {
-      return res.redirect(`${frontendRedirect}?error=google_auth_failed`);
+      throw new UnauthorizedException('google_auth_failed');
     }
   }
 }
